@@ -1,0 +1,120 @@
+name: Build Aigentik APK
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK r27b
+        run: |
+          echo "Installing NDK r27b..."
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
+
+      - name: Install CMake
+        run: |
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "cmake;3.22.1"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/libs.versions.toml') }}
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep versionName app/build.gradle.kts | \
+            sed "s/.*versionName = \"//;s/\".*//")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.9"
+
+      # FIXED KEYSTORE — same SHA-1 every build so Google OAuth always matches
+      # Secret DEBUG_KEYSTORE_BASE64 contains base64 of aigentik-debug.keystore
+      - name: Install fixed debug keystore
+        run: |
+          mkdir -p ~/.android
+          echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
+          echo "✅ Fixed keystore installed"
+          keytool -list -v \
+            -keystore ~/.android/debug.keystore \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android 2>/dev/null | grep -E "SHA1:|SHA256:"
+
+      - name: Build Debug APK
+        run: |
+          gradle assembleDebug \
+            -Pandroid.ndkVersion=27.2.12479018 \
+            --stacktrace
+
+      # Force re-sign with our fixed keystore AFTER Gradle build
+      # Gradle build cache may return a cached APK signed with a different key
+      # apksigner sign replaces all existing signatures with our fixed keystore
+      - name: Re-sign APK with fixed keystore
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          BUILDTOOLS=$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)
+          echo "Build tools version: $BUILDTOOLS"
+          $ANDROID_HOME/build-tools/$BUILDTOOLS/apksigner sign \
+            --ks ~/.android/debug.keystore \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            $APK
+          echo "✅ APK re-signed with fixed keystore"
+
+      - name: Verify APK contains native library
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          unzip -l $APK | grep -E "lib.*\.so" && \
+            echo "✅ Native libraries found" || \
+            echo "⚠️ Native libraries NOT found"
+
+      - name: Verify APK signing certificate SHA-1
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          echo "=== APK Signing Certificate ==="
+          BUILDTOOLS=$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)
+          $ANDROID_HOME/build-tools/$BUILDTOOLS/apksigner verify \
+            --verbose --print-certs $APK | grep -E "SHA-1|SHA-256|signer"
+          echo "=== Keystore SHA-1 (should match above) ==="
+          keytool -list -v \
+            -keystore ~/.android/debug.keystore \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android 2>/dev/null | grep "SHA1:"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aigentik-v${{ steps.version.outputs.version }}-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 3
+          overwrite: true
