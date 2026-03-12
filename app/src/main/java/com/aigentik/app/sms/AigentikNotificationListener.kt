@@ -65,7 +65,21 @@ class AigentikNotificationListener : NotificationListenerService() {
 
     // ── NotificationListenerService callbacks ────────────────────────────────
 
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        Log.i(TAG, "NotificationListenerService connected — ready to receive notifications")
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        Log.w(TAG, "NotificationListenerService disconnected — OS unbound the service")
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // Skip group summary notifications — these are collapsed headers, not real messages
+        val isGroupSummary = sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
+        if (isGroupSummary) return
+
         when (sbn.packageName) {
             in SMS_PACKAGES -> handleSmsNotification(sbn)
             GMAIL_PACKAGE   -> handleGmailNotification(sbn)

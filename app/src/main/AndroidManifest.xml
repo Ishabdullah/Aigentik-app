@@ -77,11 +77,14 @@
         <service
             android:name=".sms.AigentikNotificationListener"
             android:exported="true"
-            android:label="Aigentik Notification Listener"
+            android:label="Aigentik Message Listener"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.notification_listener_settings"
+                android:resource="@xml/notification_listener" />
         </service>
     </application>
 
