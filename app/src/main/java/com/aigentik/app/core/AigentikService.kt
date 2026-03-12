@@ -26,7 +26,12 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aigentik.app.R
+import com.aigentik.app.ai.AgentLLMFacade
 import com.aigentik.app.system.ConnectionWatchdog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Foreground service that keeps the Aigentik process alive on Samsung and other
@@ -57,6 +62,7 @@ class AigentikService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
@@ -82,7 +88,53 @@ class AigentikService : Service() {
         ConnectionWatchdog.start(this)
 
         Log.i(TAG, "Foreground service started — process will stay alive")
-        // TODO Stage 1: init ContactEngine, load SmolLMManager model, configure MessageEngine
+
+        // Stage 1: Initialize agent engines
+        initAgentEngines()
+    }
+
+    private fun initAgentEngines() {
+        // ContactEngine init (Room I/O — must be on background thread)
+        serviceScope.launch {
+            try {
+                ContactEngine.init(this@AigentikService)
+                Log.i(TAG, "ContactEngine ready — ${ContactEngine.getCount()} contacts")
+            } catch (e: Exception) {
+                Log.e(TAG, "ContactEngine init failed: ${e.message}")
+            }
+        }
+
+        // Configure MessageEngine (no I/O — immediate)
+        MessageEngine.configure(
+            context       = this,
+            adminNumber   = AigentikSettings.adminNumber,
+            ownerName     = AigentikSettings.ownerName,
+            agentName     = AigentikSettings.agentName,
+            ownerNotifier = { msg ->
+                Log.i(TAG, "ownerNotifier: $msg")
+                // TODO Stage 2: post to owner notification channel
+            },
+            wakeLock      = wakeLock,
+        )
+
+        // Load LLM model (slow — launch on IO, app is already running in foreground)
+        val modelPath = AigentikSettings.modelPath
+        if (modelPath.isNotBlank()) {
+            serviceScope.launch {
+                try {
+                    val ok = AgentLLMFacade.loadModel(modelPath)
+                    if (ok) {
+                        Log.i(TAG, "AgentLLMFacade ready")
+                    } else {
+                        Log.w(TAG, "AgentLLMFacade load returned false — no model at: $modelPath")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "AgentLLMFacade load failed: ${e.message}")
+                }
+            }
+        } else {
+            Log.w(TAG, "No model path configured — AI replies disabled until model is selected")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

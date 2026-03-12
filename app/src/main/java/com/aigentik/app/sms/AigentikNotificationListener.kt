@@ -4,19 +4,20 @@ import android.app.Notification
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import com.aigentik.app.agent.AgentMessageEngine
 import com.aigentik.app.core.ChannelManager
+import com.aigentik.app.core.ContactEngine
 import com.aigentik.app.core.MessageDeduplicator
+import com.aigentik.app.core.MessageEngine
 import com.aigentik.app.core.PhoneNormalizer
 import java.util.concurrent.ConcurrentHashMap
 
-// NotificationAdapter v1.5 — adapted from aigentik-android NotificationAdapter
+// NotificationAdapter v2.0 — Stage 1 complete
+// v2.0: Routes to MessageEngine (Stage 1) — replaces AgentMessageEngine stub
+//       ContactEngine name lookup in resolveSender() and for senderName
 // v1.5: ConcurrentHashMap for activeNotifications (thread safety on notification bursts)
 // v1.4: Self-reply prevention via wasSentRecently()
 // v1.3: Gmail notifications routed to EmailMonitor stub (wired in Stage 2)
 // v1.2: ALWAYS register with NotificationReplyRouter even if duplicate
-// Adaptation: uses AgentMessageEngine.onMessageReceived() instead of MessageEngine
-//             (MessageEngine ported in Stage 1, replaces AgentMessageEngine stub)
 class AigentikNotificationListener : NotificationListenerService() {
 
     companion object {
@@ -104,23 +105,21 @@ class AigentikNotificationListener : NotificationListenerService() {
             return
         }
 
-        // Route to AgentMessageEngine (stub in Stage pre-work → replaced by MessageEngine in Stage 1)
-        val channel = if (sbn.packageName == "com.android.mms")
-            AgentMessageEngine.Channel.SMS else AgentMessageEngine.Channel.RCS
+        // Resolve sender name from ContactEngine for better context in AI replies
+        val senderName = ContactEngine.findContact(sender)?.name
 
-        AgentMessageEngine.onMessageReceived(
-            AgentMessageEngine.InboundMessage(
-                channel     = channel,
-                packageName = sbn.packageName,
+        // Route to MessageEngine (Stage 1)
+        MessageEngine.onMessageReceived(
+            MessageEngine.Message(
+                id          = dedupKey,
+                channel     = MessageEngine.Channel.NOTIFICATION,
                 sender      = sender,
-                senderRaw   = title,
+                senderName  = senderName,
                 body        = text,
-                sbnKey      = sbn.key,
-                timestamp   = timestamp,
-                dedupKey    = dedupKey,
+                packageName = sbn.packageName,
             )
         )
-        Log.i(TAG, "SMS/RCS notification → AgentMessageEngine: $dedupKey")
+        Log.i(TAG, "SMS/RCS notification → MessageEngine: $dedupKey")
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
@@ -136,7 +135,9 @@ class AigentikNotificationListener : NotificationListenerService() {
             val candidate = phoneMatch.value
             if (PhoneNormalizer.looksLikePhoneNumber(candidate)) return PhoneNormalizer.toE164(candidate)
         }
-        // TODO Stage 1: ContactEngine.findContact(title) for name → phone resolution
+        // Try ContactEngine name lookup before falling back to raw title
+        val byName = ContactEngine.findContact(title)
+        if (byName?.phones?.isNotEmpty() == true) return PhoneNormalizer.toE164(byName.phones.first())
         Log.w(TAG, "Could not resolve phone for '$title' — using name as sender ID")
         return title
     }

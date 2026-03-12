@@ -675,18 +675,20 @@ These files have no inter-dependencies on unbuilt stages. Copy verbatim, compile
 
 ---
 
-## Stage 1: SMS/RCS Receive + AI Reply ⬜
+## Stage 1: SMS/RCS Receive + AI Reply ✅ COMPLETE 2026-03-12
 
 **Goal:** Send an SMS to the phone, get an AI-generated reply back.
 
-**Files to copy from aigentik-android:**
-- ⬜ `core/ContactEngine.kt` — phone/name lookup with `CopyOnWriteArrayList` cache. Add `Contact` entity to `AppRoomDatabase`, bump db version to 2.
-- ⬜ `core/ChatBridge.kt` — adapted to write to `AppDB.addAssistantMessage()` instead of separate `ChatDatabase`
-- ⬜ `ai/AiEngine.kt` — reference only; create `ai/AgentLLMFacade.kt` wrapping `SmolLMManager` with named generation methods: `generateSmsReply()`, `generateEmailReply()`, `generateChatReply()`, `interpretCommand()`. Port Qwen3 `<think>` prefill trick verbatim.
-- ⬜ `core/MessageEngine.kt` — central routing hub. Copy verbatim, convert `object` → `@Single`, replace `AiEngine` calls with `AgentLLMFacade`. SMS path fully wired. Email path stubbed.
-- ⬜ `core/AdminAuthManager.kt` — SHA-256 password, 30-min session. Needed even in Stage 1 so admin can send test commands via SMS.
-- ⬜ Update `AigentikService.kt` — init `ContactEngine`, load model via `SmolLMManager`, call `MessageEngine.configure()` with wake lock
-- ⬜ Replace `AgentMessageEngine` stub — wire to `MessageEngine.onMessageReceived()` (or delete and use MessageEngine directly)
+**Files created/updated:**
+- ✅ `core/ContactEntity.kt` + `ContactDao.kt` + `ContactDatabase.kt` — standalone Room DB for contacts (separate from AppRoomDatabase to avoid migration conflicts)
+- ✅ `core/ContactEngine.kt` — phone/name lookup, Android contacts sync, Room persistence, CopyOnWriteArrayList thread-safety
+- ✅ `ai/AgentLLMFacade.kt` — wraps SmolLM directly (own instance, storeChats=false); generateSmsReply, generateChatReply, interpretCommand, parseSimpleCommandPublic, warmUp; ReentrantLock for JNI thread safety
+- ✅ `core/MessageEngine.kt` — Stage 1 SMS engine; messageMutex; admin auth; fast-path command routing; ContactEngine sender lookup; AgentLLMFacade AI replies; NotificationReplyRouter inline reply; email actions stubbed
+- ✅ `auth/AdminAuthManager.kt` — SHA-256 password, 30-min session, destructive keyword detection
+- ✅ `core/AigentikService.kt` — initAgentEngines(): ContactEngine.init() on IO, MessageEngine.configure(), AgentLLMFacade.loadModel() from AigentikSettings.modelPath
+- ✅ `sms/AigentikNotificationListener.kt` — routes to MessageEngine; ContactEngine name lookup in resolveSender and senderName
+
+**NOTE:** `ChatBridge.kt` deferred to Stage 2 — not needed for SMS reply test. Agent notifications appear in logcat only until ownerNotifier is wired to a UI notification channel.
 
 **Test for Stage 1:**
 1. Load a model in the app

@@ -61,3 +61,47 @@ Read files from aigentik-android:
 - Test: send SMS → get AI reply back
 
 ---
+
+## 2026-03-12 — Session 3: Stage 1 Complete
+
+### Implemented
+
+- `core/ContactEntity.kt` — Room entity for contact intelligence (copied from aigentik-android)
+- `core/ContactDao.kt` — Room DAO for contacts (synchronous queries, IO-thread callers)
+- `core/ContactDatabase.kt` — standalone Room database for contacts (separate from AppRoomDatabase)
+- `core/ContactEngine.kt` — full contact intelligence: findContact, findOrCreate, syncAndroidContacts, Room persistence, JSON migration path, CopyOnWriteArrayList thread safety
+- `auth/AdminAuthManager.kt` (new package) — remote admin auth via SMS; SHA-256 password hashing, 30-min session TTL, destructive keyword detection
+- `ai/AgentLLMFacade.kt` — wraps SmolLM directly (NOT SmolLMManager); storeChats=false for stateless generation; generateSmsReply, generateChatReply, interpretCommand, parseSimpleCommandPublic; regex-based fast path + LLM fallback; ReentrantLock for JNI thread safety; warmUp on load
+- `core/MessageEngine.kt` — Stage 1 SMS/RCS engine; messageMutex serializes all handlers; admin auth via AdminAuthManager; fast-path bypasses LLM for known commands; ContactEngine for sender context; AgentLLMFacade for AI replies; NotificationReplyRouter for inline replies; email actions stubbed for Stage 2
+- `core/AigentikService.kt` — updated: initAgentEngines() launches ContactEngine.init() on IO, configures MessageEngine, loads AgentLLMFacade model if modelPath is set
+- `sms/AigentikNotificationListener.kt` — updated: routes SMS/RCS to MessageEngine instead of AgentMessageEngine stub; ContactEngine name lookup for senderName and sender resolution
+
+### Architecture
+
+- `AgentLLMFacade` is an `object` (not Koin) with its own `SmolLM` instance — independent from SmolLMManager (chat UI). Two model instances may coexist if chat UI is also active. Known Stage 2 issue: implement model sharing.
+- `ContactDatabase` is a SEPARATE Room database from `AppRoomDatabase` (chat/tasks). No version conflict.
+- Admin commands via SMS: format `Admin: YourName\nPassword: xxxx\n<command>`. Session lasts 30 min.
+
+### Testing — What You Need
+
+1. **Model path**: `AigentikSettings.modelPath` must be set. After downloading a model via SmolChat UI, find the path and set it. The agent uses this path for `AgentLLMFacade.loadModel()`. (Settings UI for this is Stage 2.)
+2. **Admin number**: Set `AigentikSettings.adminNumber` to your phone number (the one you'll SMS from).
+3. **Owner name**: Set `AigentikSettings.ownerName` to your name.
+4. **Notification access**: Must be granted (Settings → Notification Access → Aigentik).
+
+### Test Scenarios
+
+1. **Cold start**: Launch app → check `adb logcat -s AigentikService,MessageEngine,AgentLLMFacade` → should see ContactEngine ready, MessageEngine configured, model loading
+2. **SMS from unknown number**: Should get AI reply via inline reply: "Hi there, Aigentik here..."
+3. **SMS from admin number**: Should route to handleAdminCommand; try "status" → should reply with AI/contact/channel status
+4. **Admin via SMS**: Send `Admin: YourName\nPassword: xxxx\nstatus` → auth + command in one message
+
+### Known Gaps (Stage 2)
+
+- `AigentikSettings.modelPath` not set automatically from SmolChat's model selection — needs Settings UI or manual set
+- Email actions all return "not available — Stage 2" responses
+- ownerNotifier only logs to logcat; no push notification to owner's screen yet
+- Conversation history not persisted between sessions (no ConversationHistoryDatabase)
+- `SmolLM.storeChats=false` behavior relies on messages list clearing after each completion — if behavior differs, context may accumulate; needs validation
+
+---
