@@ -215,3 +215,4 @@ limitations under the License.
 ## Acknowledgements
 
 This project is a fork of [SmolChat-Android](https://github.com/shubham0204/SmolChat-Android) by Shubham Panchal, extended with email, calendar, and SMS integration capabilities.
+# Test build
