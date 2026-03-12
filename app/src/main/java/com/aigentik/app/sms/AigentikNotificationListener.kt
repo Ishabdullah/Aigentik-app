@@ -17,6 +17,8 @@
 package com.aigentik.app.sms
 
 import android.app.Notification
+import android.app.RemoteInput
+import android.content.Intent
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -30,14 +32,14 @@ import kotlinx.coroutines.flow.asStateFlow
  * - Google Messages (com.google.android.apps.messaging)
  * - Samsung Messages (com.samsung.android.messaging)
  * - Other messaging apps
- * 
+ *
  * This service enables AI-powered reply suggestions and auto-replies.
  */
 class AigentikNotificationListener : NotificationListenerService() {
-    
+
     companion object {
         private const val TAG = "AigentikNotificationListener"
-        
+
         // Supported messaging app packages
         val SUPPORTED_PACKAGES = setOf(
             "com.google.android.apps.messaging",      // Google Messages
@@ -49,83 +51,82 @@ class AigentikNotificationListener : NotificationListenerService() {
             "com.facebook.orca",                       // Messenger
             "com.snapchat.android"                     // Snapchat
         )
-        
+
         // Key strings for extracting notification content
         val NOTIFICATION_TITLE_KEYS = setOf(
             "android.title",
             "android.title.big"
         )
-        
+
         val NOTIFICATION_TEXT_KEYS = setOf(
             "android.text",
             "android.bigText",
             "android.infoText"
         )
     }
-    
+
     private val _incomingMessages = MutableStateFlow<List<IncomingNotification>>(emptyList())
     val incomingMessages: StateFlow<List<IncomingNotification>> = _incomingMessages.asStateFlow()
-    
+
     private val _replyActions = MutableStateFlow<List<ReplyAction>>(emptyList())
     val replyActions: StateFlow<List<ReplyAction>> = _replyActions.asStateFlow()
-    
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val packageName = sbn.packageName
-        val tag = sbn.tag
-        val id = sbn.id
-        
+
         // Check if this is from a supported messaging app
         if (packageName !in SUPPORTED_PACKAGES) {
             return
         }
-        
+
         try {
             val notification = sbn.notification
             val extras = notification.extras
-            
+
             // Extract notification content
             val title = extractTextFromExtras(extras, NOTIFICATION_TITLE_KEYS)
             val text = extractTextFromExtras(extras, NOTIFICATION_TEXT_KEYS)
             val ticker = notification.tickerText?.toString()
-            
+
             Log.d(TAG, "Notification from $packageName: title=$title, text=$text")
-            
+
             // Check for quick reply actions (RCS support)
             val replyActions = extractReplyActions(notification)
             if (replyActions.isNotEmpty()) {
                 _replyActions.value = replyActions
             }
-            
+
             // Create incoming message notification
+            // FLAG_ONGOING_EVENT means the notification cannot be dismissed — isClearable is the inverse
+            val isClearable = (notification.flags and Notification.FLAG_ONGOING_EVENT) == 0
             val incomingMsg = IncomingNotification(
                 packageName = packageName,
                 title = title,
                 message = text ?: ticker,
                 timestamp = sbn.postTime,
-                isClearable = notification.isOngoing.not()
+                isClearable = isClearable
             )
-            
+
             _incomingMessages.value = _incomingMessages.value + incomingMsg
-            
+
             // Trigger AI reply suggestion
             if (!text.isNullOrBlank()) {
                 triggerAIReplySuggestion(incomingMsg)
             }
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "Error processing notification", e)
         }
     }
-    
+
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         val packageName = sbn.packageName
         if (packageName !in SUPPORTED_PACKAGES) return
-        
+
         // Remove from incoming messages when notification is dismissed
-        val id = sbn.id
         _incomingMessages.value = _incomingMessages.value.filter { it.timestamp != sbn.postTime }
     }
-    
+
     private fun extractTextFromExtras(extras: Bundle, keys: Set<String>): String? {
         for (key in keys) {
             val charSequence = extras.getCharSequence(key)
@@ -135,34 +136,36 @@ class AigentikNotificationListener : NotificationListenerService() {
         }
         return null
     }
-    
+
     private fun extractReplyActions(notification: Notification): List<ReplyAction> {
         val actions = mutableListOf<ReplyAction>()
-        
+
         // Android 7.0+ direct reply actions
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             notification.actions?.forEach { action ->
-                if (action.getRemoteInput() != null) {
+                // remoteInputs is the public API for getting RemoteInput instances on an Action
+                val remoteInput = action.remoteInputs?.firstOrNull()
+                if (remoteInput != null) {
                     actions.add(
                         ReplyAction(
                             title = action.title.toString(),
                             pendingIntent = action.actionIntent,
-                            remoteInput = action.getRemoteInput()
+                            remoteInput = remoteInput
                         )
                     )
                 }
             }
         }
-        
+
         return actions
     }
-    
+
     private fun triggerAIReplySuggestion(message: IncomingNotification) {
         // This will be connected to the LLM for AI-powered reply suggestions
         // The ViewModel will handle generating suggestions using the loaded model
         Log.d(TAG, "Triggering AI reply suggestion for: ${message.message}")
     }
-    
+
     /**
      * Send a quick reply using the notification action
      */
@@ -171,31 +174,34 @@ class AigentikNotificationListener : NotificationListenerService() {
             try {
                 val remoteInput = replyAction.remoteInput ?: return
                 val pendingIntent = replyAction.pendingIntent ?: return
-                
-                val results = Bundle()
-                remoteInput.putResultsFromInput(replyText, results)
-                
-                pendingIntent.send(this, 0, null, results, null)
+
+                // Build a filled-in Intent with the reply text in the RemoteInput bundle
+                val replyIntent = Intent()
+                val resultBundle = Bundle()
+                resultBundle.putString(remoteInput.resultKey, replyText)
+                RemoteInput.addResultsToIntent(arrayOf(remoteInput), replyIntent, resultBundle)
+
+                pendingIntent.send(this, 0, replyIntent)
                 Log.d(TAG, "Quick reply sent: $replyText")
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending quick reply", e)
             }
         }
     }
-    
+
     /**
      * Check if notification listener is enabled
      */
     fun isNotificationListenerEnabled(): Boolean {
+        // NotificationListenerService extends Service which extends Context — use 'this' directly
         val packages = android.provider.Settings.Secure.getString(
-            context?.contentResolver,
+            contentResolver,
             "enabled_notification_listeners"
         )
-        
+
         if (!packages.isNullOrBlank()) {
-            val packageName = context?.packageName ?: return false
-            val packageNames = packages.split(":")
-            return packageNames.any { it.contains(packageName) }
+            val pkgName = packageName
+            return packages.split(":").any { it.contains(pkgName) }
         }
         return false
     }

@@ -19,7 +19,6 @@ package com.aigentik.app.sms
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.provider.Telephony
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,35 +29,28 @@ import kotlinx.coroutines.flow.asStateFlow
  * Receives SMS_RECEIVED broadcasts and processes incoming messages
  */
 class SMSReceiver : BroadcastReceiver() {
-    
+
     companion object {
         private const val TAG = "AigentikSMSReceiver"
-        
+
         private val _incomingSMS = MutableStateFlow<List<SMSMessage>>(emptyList())
         val incomingSMS = _incomingSMS.asStateFlow()
     }
-    
+
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
             return
         }
-        
+
         try {
             val messages = mutableListOf<SMSMessage>()
-            
-            // Extract SMS from intent
-            val smsMessages = when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
-                    intent.getParcelableArrayListExtra(Telephony.Intents.EXTRA_SMS_MESSAGES, SMSMessage::class.java)
-                }
-                else -> {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableArrayListExtra(Telephony.Intents.EXTRA_SMS_MESSAGES)
-                }
-            }
-            
-            smsMessages?.forEach { sms ->
+
+            // Use the standard telephony API to extract SmsMessage PDUs from the intent.
+            // getMessagesFromIntent handles all SDK versions and PDU parsing internally.
+            val rawMessages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+            rawMessages?.forEach { sms ->
                 val message = SMSMessage(
+                    threadId = 0L, // Thread ID is not available at receive time; resolved later
                     address = sms.originatingAddress ?: "",
                     body = sms.messageBody ?: "",
                     type = MessageType.INBOX,
@@ -67,22 +59,22 @@ class SMSReceiver : BroadcastReceiver() {
                 )
                 messages.add(message)
             }
-            
+
             // Update flow with new messages
             _incomingSMS.value = _incomingSMS.value + messages
-            
+
             Log.d(TAG, "Received ${messages.size} SMS messages")
-            
+
             // Trigger AI reply suggestion for incoming messages
             messages.forEach { message ->
                 triggerAIReplySuggestion(context, message)
             }
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "Error processing SMS", e)
         }
     }
-    
+
     private fun triggerAIReplySuggestion(context: Context, message: SMSMessage) {
         // This will be connected to the LLM for AI-powered reply suggestions
         // The ViewModel will handle generating suggestions using the loaded model

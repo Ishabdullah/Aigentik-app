@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     id("com.google.devtools.ksp")
     id("com.google.gms.google-services")
-    kotlin("plugin.serialization") version "2.1.0"
+    kotlin("plugin.serialization") version "2.0.0"
 }
 
 android {
@@ -72,6 +72,31 @@ android {
         implementation {
             exclude(group = "org.jetbrains", module = "annotations")
         }
+    }
+}
+
+// Remove duplicate launcher icon PNG files when WEBP versions exist in the same mipmap directory.
+// Both formats were committed simultaneously; keep webp (smaller, modern) and drop png.
+val removeDuplicateLauncherIcons by tasks.registering {
+    doFirst {
+        val densities = listOf("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi")
+        val names = listOf("ic_launcher", "ic_launcher_foreground", "ic_launcher_round")
+        densities.forEach { density ->
+            names.forEach { name ->
+                val dir = file("src/main/res/mipmap-$density")
+                val png = File(dir, "$name.png")
+                val webp = File(dir, "$name.webp")
+                if (png.exists() && webp.exists()) {
+                    png.delete()
+                }
+            }
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.withType<com.android.build.gradle.tasks.MergeResources>().configureEach {
+        dependsOn(removeDuplicateLauncherIcons)
     }
 }
 

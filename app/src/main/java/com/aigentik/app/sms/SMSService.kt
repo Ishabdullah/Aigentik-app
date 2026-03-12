@@ -18,7 +18,6 @@ package com.aigentik.app.sms
 
 import android.content.ContentValues
 import android.content.Context
-import android.database.Cursor
 import android.net.Uri
 import android.provider.Telephony
 import kotlinx.coroutines.Dispatchers
@@ -35,7 +34,13 @@ import android.content.Intent
  * - AI-powered reply suggestions
  */
 class SMSService(private val context: Context) {
-    
+
+    companion object {
+        // Telephony.Threads.UNREAD_COUNT is a hidden/unavailable symbol in some SDK builds.
+        // Use the raw column name, which is stable across Android versions.
+        private const val THREADS_UNREAD_COUNT = "unread_count"
+    }
+
     /**
      * Get all SMS conversations
      */
@@ -49,21 +54,21 @@ class SMSService(private val context: Context) {
                 Telephony.Threads.DATE,
                 Telephony.Threads.MESSAGE_COUNT,
                 Telephony.Threads.RECIPIENT_IDS,
-                Telephony.Threads.UNREAD_COUNT
+                THREADS_UNREAD_COUNT
             )
-            
+
             context.contentResolver.query(uri, projection, null, null, "${Telephony.Threads.DATE} DESC")?.use { cursor ->
                 while (cursor.moveToNext()) {
                     val threadId = cursor.getLong(0)
                     val snippet = cursor.getString(1) ?: ""
                     val date = cursor.getLong(2)
                     val messageCount = cursor.getInt(3)
-                    val unreadCount = cursor.getInt(5)
-                    
+                    val unreadCount = try { cursor.getInt(5) } catch (_: Exception) { 0 }
+
                     // Get recipient address
                     val address = getRecipientAddress(threadId)
                     val displayName = getContactNameByAddress(address)
-                    
+
                     conversations.add(
                         SMSConversation(
                             threadId = threadId,
@@ -77,13 +82,13 @@ class SMSService(private val context: Context) {
                     )
                 }
             }
-            
+
             Result.success(conversations)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Get messages in a specific conversation thread
      */
@@ -101,15 +106,15 @@ class SMSService(private val context: Context) {
                 Telephony.Sms.DATE,
                 Telephony.Sms.PERSON
             )
-            
+
             val selection = "${Telephony.Sms.THREAD_ID} = ?"
             val selectionArgs = arrayOf(threadId.toString())
-            
+
             context.contentResolver.query(
-                uri, 
-                projection, 
-                selection, 
-                selectionArgs, 
+                uri,
+                projection,
+                selection,
+                selectionArgs,
                 "${Telephony.Sms.DATE} ASC"
             )?.use { cursor ->
                 while (cursor.moveToNext()) {
@@ -127,42 +132,42 @@ class SMSService(private val context: Context) {
                     )
                 }
             }
-            
+
             Result.success(messages)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Send an SMS message
      */
     suspend fun sendSMS(phoneNumber: String, message: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val smsManager = SmsManager.getDefault()
-            
+
             // Split long messages
             val parts = smsManager.divideMessage(message)
-            
-            // Create sent intents for delivery confirmation
-            val sentIntents = parts.map {
+
+            // Create sent/delivery intents — SmsManager requires ArrayList, not List
+            val sentIntents = ArrayList(parts.map {
                 PendingIntent.getBroadcast(
                     context,
                     0,
                     Intent("SMS_SENT"),
                     PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
                 )
-            }
-            
-            val deliveryIntents = parts.map {
+            })
+
+            val deliveryIntents = ArrayList(parts.map {
                 PendingIntent.getBroadcast(
                     context,
                     0,
                     Intent("SMS_DELIVERED"),
                     PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
                 )
-            }
-            
+            })
+
             // Send the message
             smsManager.sendMultipartTextMessage(
                 phoneNumber,
@@ -171,16 +176,16 @@ class SMSService(private val context: Context) {
                 sentIntents,
                 deliveryIntents
             )
-            
+
             // Save to sent folder
             saveMessageToStore(phoneNumber, message, Telephony.Sms.MESSAGE_TYPE_SENT)
-            
+
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Mark a message as read
      */
@@ -189,16 +194,16 @@ class SMSService(private val context: Context) {
             val values = ContentValues().apply {
                 put(Telephony.Sms.READ, 1)
             }
-            
+
             val uri = Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, messageId.toString())
             context.contentResolver.update(uri, values, null, null)
-            
+
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Mark entire thread as read
      */
@@ -207,23 +212,23 @@ class SMSService(private val context: Context) {
             val values = ContentValues().apply {
                 put(Telephony.Sms.READ, 1)
             }
-            
+
             val selection = "${Telephony.Sms.THREAD_ID} = ?"
             val selectionArgs = arrayOf(threadId.toString())
-            
+
             context.contentResolver.update(
                 Telephony.Sms.CONTENT_URI,
                 values,
                 selection,
                 selectionArgs
             )
-            
+
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Delete a message
      */
@@ -231,13 +236,13 @@ class SMSService(private val context: Context) {
         try {
             val uri = Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, messageId.toString())
             context.contentResolver.delete(uri, null, null)
-            
+
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Generate AI-powered reply suggestion for a message
      * This will be connected to the LLM
@@ -245,97 +250,80 @@ class SMSService(private val context: Context) {
     suspend fun generateAIReply(message: SMSMessage): Result<String> = withContext(Dispatchers.IO) {
         try {
             // TODO: Connect to LLM for AI reply generation
-            // This is a placeholder that will be implemented with the LLM integration
             Result.success("Thanks for your message! I'll get back to you soon.")
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     /**
      * Generate multiple AI reply suggestions
      */
     suspend fun generateAIReplySuggestions(message: SMSMessage, count: Int = 3): Result<List<String>> = withContext(Dispatchers.IO) {
         try {
             // TODO: Connect to LLM for multiple AI reply suggestions
-            val suggestions = mutableListOf<String>()
-            for (i in 1..count) {
-                suggestions.add("Suggestion $i: Thanks for your message!")
-            }
+            val suggestions = (1..count).map { i -> "Suggestion $i: Thanks for your message!" }
             Result.success(suggestions)
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     private fun getRecipientAddress(threadId: Long): String {
         val uri = Uri.withAppendedPath(Telephony.Threads.CONTENT_URI, threadId.toString())
         val projection = arrayOf(Telephony.Threads.RECIPIENT_IDS)
-        
+
         var address = ""
         context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val recipientIds = cursor.getString(0)
-                // Get the actual phone number from recipient IDs
                 address = getPhoneNumberFromRecipientIds(recipientIds)
             }
         }
-        
+
         return address
     }
-    
+
     private fun getPhoneNumberFromRecipientIds(recipientIds: String): String {
-        // Query the recipients table to get the phone number
-        val uri = Telephony.Participants.CONTENT_URI
-        val projection = arrayOf(Telephony.Participants.CONTACT_ID)
-        val selection = "${Telephony.Participants.THREAD_ID} = ?"
-        val selectionArgs = arrayOf(recipientIds)
-        
-        var phoneNumber = ""
-        context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                // Get the contact's phone number
-                val contactId = cursor.getLong(0)
-                phoneNumber = getPhoneNumberByContactId(contactId)
+        // Query the canonical-addresses content URI.
+        // This is a stable internal URI used by AOSP and OEM messaging apps to resolve
+        // recipient IDs (integers stored in threads table) to actual phone numbers.
+        val firstId = recipientIds.trim().split(" ").firstOrNull() ?: return recipientIds
+        val uri = Uri.parse("content://mms-sms/canonical-addresses")
+        val projection = arrayOf("address")
+        val selection = "_id = ?"
+        val selectionArgs = arrayOf(firstId)
+
+        return try {
+            var phoneNumber = recipientIds // fallback to the raw ID string
+            context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    phoneNumber = cursor.getString(0) ?: recipientIds
+                }
             }
+            phoneNumber
+        } catch (e: Exception) {
+            recipientIds
         }
-        
-        return phoneNumber
     }
-    
-    private fun getPhoneNumberByContactId(contactId: Long): String {
-        val uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI
-        val projection = arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER)
-        val selection = "${android.provider.ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?"
-        val selectionArgs = arrayOf(contactId.toString())
-        
-        var phoneNumber = ""
-        context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                phoneNumber = cursor.getString(0)
-            }
-        }
-        
-        return phoneNumber
-    }
-    
+
     private fun getContactNameByAddress(address: String): String? {
         val uri = Uri.withAppendedPath(
             android.provider.ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
             Uri.encode(address)
         )
         val projection = arrayOf(android.provider.ContactsContract.PhoneLookup.DISPLAY_NAME)
-        
+
         var displayName: String? = null
         context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 displayName = cursor.getString(0)
             }
         }
-        
+
         return displayName
     }
-    
+
     private fun saveMessageToStore(address: String, message: String, type: Int) {
         val values = ContentValues().apply {
             put(Telephony.Sms.ADDRESS, address)
@@ -344,7 +332,7 @@ class SMSService(private val context: Context) {
             put(Telephony.Sms.READ, 1)
             put(Telephony.Sms.DATE, System.currentTimeMillis())
         }
-        
+
         context.contentResolver.insert(Telephony.Sms.CONTENT_URI, values)
     }
 }

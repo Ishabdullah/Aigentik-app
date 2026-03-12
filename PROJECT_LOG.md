@@ -84,6 +84,48 @@ Priority: Medium (after benchmark infrastructure and policy engine).
 
 ---
 
+**[BUILD] Fixed fourth build failure — Kotlin compilation errors in SMS package**
+
+Three files had API usage errors. Root cause: SMS code was written against non-existent or private Android SDK symbols.
+
+**AigentikNotificationListener.kt:**
+- `notification.isOngoing` → `(notification.flags and Notification.FLAG_ONGOING_EVENT) == 0` — `isOngoing` is not a public property; `FLAG_ONGOING_EVENT` is the correct flag
+- `action.getRemoteInput()` → `action.remoteInputs?.firstOrNull()` — the public API is the `remoteInputs: Array<RemoteInput>?` property, not a `getRemoteInput()` method
+- `remoteInput.putResultsFromInput(...)` + bad `pendingIntent.send()` → replaced with `RemoteInput.addResultsToIntent(arrayOf(remoteInput), intent, bundle)` + `pendingIntent.send(this, 0, intent)`
+- `context?.contentResolver` / `context?.packageName` inside `NotificationListenerService` → use `contentResolver` / `packageName` directly (the service IS the context)
+
+**SMSReceiver.kt:**
+- `intent.getParcelableArrayListExtra(Telephony.Intents.EXTRA_SMS_MESSAGES, SMSMessage::class.java)` → `Telephony.Sms.Intents.getMessagesFromIntent(intent)` — SMS intents carry raw PDU data as `android.telephony.SmsMessage`, not the app's `SMSMessage` data class. The `Telephony.Intents` class also doesn't exist; it's `Telephony.Sms.Intents`
+- `sms.originatingAddress`, `sms.messageBody`, `sms.timestampMillis` now work correctly as these are properties of `android.telephony.SmsMessage`
+- Added `threadId = 0L` (unknown at receive time, resolved later via content provider)
+
+**SMSService.kt:**
+- `Telephony.Threads.UNREAD_COUNT` → `"unread_count"` raw string constant — this symbol is unavailable in the public SDK; the column name is stable
+- `List<PendingIntent>` → `ArrayList<PendingIntent>` for `SmsManager.sendMultipartTextMessage()` which requires `ArrayList` not `List`
+- `Telephony.Participants` → replaced with query to `content://mms-sms/canonical-addresses` — `Telephony.Participants` is a hidden internal API that is not in the public SDK
+
+---
+
+**[BUILD] Fixed third build failure — duplicate launcher icon resources**
+
+Root cause: Each `mipmap-*` directory contained both `.png` and `.webp` versions of `ic_launcher`, `ic_launcher_foreground`, and `ic_launcher_round`. Android resource merger treats `.png` and `.webp` with the same base name as duplicate resources and fails.
+
+This occurred because `.webp` icons were added without removing the original `.png` files (probably from "Update icons" commit).
+
+Fix: Added a `removeDuplicateLauncherIcons` Gradle task to `app/build.gradle.kts` that deletes `.png` files when a matching `.webp` exists in the same mipmap directory, wired to run before all `MergeResources` tasks via `afterEvaluate`.
+
+Permanent cleanup needed: Run `git rm app/src/main/res/mipmap-*/ic_launcher*.png` to permanently remove the PNGs from the repository and avoid the runtime deletion.
+
+---
+
+**[BUILD] Fixed KSP/Kotlin version mismatch warning**
+
+`kotlin("plugin.serialization")` was pinned to version `2.1.0` across all modules (`app/`, `hf-model-hub-api/`, root) while the main Kotlin version in `libs.versions.toml` is `2.0.0`. KSP `2.0.0-1.0.24` is only compatible with Kotlin 2.0.x. The 2.1.0 serialization plugin caused repeated warnings.
+
+Fix: Downgraded serialization plugin to `2.0.0` in all three `build.gradle.kts` files to match the Kotlin version.
+
+---
+
 **[BUILD] Fixed second build failure — Gradle version mismatch in CI workflow**
 
 Root cause: AGP 8.13.0 requires Gradle 8.13+. The `gradle-wrapper.properties` already specifies `gradle-8.13-bin.zip`, but `.github/workflows/build.yml` overrode it with `gradle-version: "8.9"` via `gradle/actions/setup-gradle@v3`. This caused Gradle 8.9 to be used instead of the wrapper version.
