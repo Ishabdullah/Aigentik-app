@@ -29,6 +29,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -163,10 +165,12 @@ class ChatActivity : ComponentActivity() {
          */
         if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             intent.getStringExtra(Intent.EXTRA_TEXT)?.let { text ->
-                val chatCount = viewModel.appDB.getChatsCount()
-                val newChat = viewModel.appDB.addChat(chatName = "Untitled ${chatCount + 1}")
-                viewModel.onEvent(ChatScreenUIEvent.ChatEvents.SwitchChat(newChat))
-                viewModel.questionTextDefaultVal = text
+                lifecycleScope.launch {
+                    val chatCount = viewModel.appDB.getChatsCount()
+                    val newChat = viewModel.appDB.addChat(chatName = "Untitled ${chatCount + 1}")
+                    viewModel.onEvent(ChatScreenUIEvent.ChatEvents.SwitchChat(newChat))
+                    viewModel.questionTextDefaultVal = text
+                }
             }
         }
 
@@ -177,8 +181,10 @@ class ChatActivity : ComponentActivity() {
          */
         if (intent?.action == Intent.ACTION_VIEW && intent.getLongExtra("task_id", 0L) != 0L) {
             val taskId = intent.getLongExtra("task_id", 0L)
-            viewModel.appDB.getTask(taskId).let { task ->
-                viewModel.onEvent(ChatScreenUIEvent.ChatEvents.OnTaskSelected(task))
+            lifecycleScope.launch {
+                viewModel.appDB.getTask(taskId).let { task ->
+                    viewModel.onEvent(ChatScreenUIEvent.ChatEvents.OnTaskSelected(task))
+                }
             }
         }
 

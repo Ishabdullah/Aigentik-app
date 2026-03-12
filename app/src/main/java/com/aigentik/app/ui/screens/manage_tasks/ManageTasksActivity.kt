@@ -70,17 +70,11 @@ class ManageTasksActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             Box(modifier = Modifier.safeDrawingPadding()) {
-                val tasks by viewModel.appDB.getTasks().collectAsState(emptyList())
+                val tasks by viewModel.tasksState.collectAsState()
                 val models by viewModel.appDB.getModels().collectAsState(emptyList())
                 TasksActivityScreenUI(
-                    tasks =
-                        tasks.map {
-                            val modelName =
-                                viewModel.modelsRepository.getModelFromId(it.modelId).name
-                            it.copy(modelName = modelName)
-                        },
+                    tasks = tasks,
                     availableModelsList = models,
-                    getModelFromId = viewModel.modelsRepository::getModelFromId,
                     onUpdateTask = viewModel::updateTask,
                     onAddTask = viewModel::addTask,
                     onDeleteTask = viewModel::deleteTask,
@@ -96,7 +90,6 @@ private fun PreviewTasksActivityScreenUI() {
     TasksActivityScreenUI(
         tasks = dummyTasksList,
         availableModelsList = dummyLLMModels,
-        getModelFromId = { id -> dummyLLMModels.first { it.id == id } },
         onUpdateTask = {},
         onAddTask = { _, _, _ -> },
         onDeleteTask = {},
@@ -108,7 +101,6 @@ private fun PreviewTasksActivityScreenUI() {
 private fun TasksActivityScreenUI(
     tasks: List<Task>,
     availableModelsList: List<LLMModel>,
-    getModelFromId: (Long) -> LLMModel,
     onAddTask: (String, String, Long) -> Unit,
     onUpdateTask: (Task) -> Unit,
     onDeleteTask: (Long) -> Unit,
@@ -187,11 +179,9 @@ private fun TasksActivityScreenUI(
                         onDismiss = { showCreateTaskDialog = false },
                         onAddTask = onAddTask,
                     )
-                }
                 if (showEditTaskDialog && selectedTask != null) {
                     EditTaskDialog(
                         selectedTask = selectedTask!!,
-                        selectedTaskModel = getModelFromId(selectedTask!!.modelId),
                         availableModelsList = availableModelsList,
                         onDismiss = { showEditTaskDialog = false },
                         onUpdateTask = onUpdateTask,

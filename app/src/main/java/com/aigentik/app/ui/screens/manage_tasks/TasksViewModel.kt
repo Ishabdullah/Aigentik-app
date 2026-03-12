@@ -17,22 +17,48 @@
 package com.aigentik.app.ui.screens.manage_tasks
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import com.aigentik.app.data.AppDB
 import com.aigentik.app.data.Task
 import com.aigentik.app.llm.ModelsRepository
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.toImmutableList
 import org.koin.android.annotation.KoinViewModel
 
 @KoinViewModel
 class TasksViewModel(val modelsRepository: ModelsRepository, val appDB: AppDB) : ViewModel() {
+    val tasksState: StateFlow<ImmutableList<Task>> =
+        appDB.getTasks().map { tasks ->
+            tasks.map { task ->
+                val model = modelsRepository.getModelFromId(task.modelId)
+                task.copy(modelName = model.name)
+            }.toImmutableList()
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList<Task>().toImmutableList()
+        )
+
     fun addTask(name: String, systemPrompt: String, modelId: Long) {
-        appDB.addTask(name, systemPrompt, modelId)
+        viewModelScope.launch {
+            appDB.addTask(name, systemPrompt, modelId)
+        }
     }
 
     fun updateTask(newTask: Task) {
-        appDB.updateTask(newTask)
+        viewModelScope.launch {
+            appDB.updateTask(newTask)
+        }
     }
 
     fun deleteTask(taskId: Long) {
-        appDB.deleteTask(taskId)
+        viewModelScope.launch {
+            appDB.deleteTask(taskId)
+        }
     }
 }

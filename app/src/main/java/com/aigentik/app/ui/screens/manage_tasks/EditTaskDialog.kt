@@ -67,7 +67,6 @@ import kotlinx.collections.immutable.toImmutableList
 private fun PreviewEditTaskDialog() {
     EditTaskDialog(
         selectedTask = dummyTasksList[0],
-        selectedTaskModel = dummyLLMModels[0],
         availableModelsList = dummyLLMModels,
         onDismiss = {},
         onUpdateTask = {},
@@ -77,7 +76,6 @@ private fun PreviewEditTaskDialog() {
 @Composable
 fun EditTaskDialog(
     selectedTask: Task,
-    selectedTaskModel: LLMModel,
     availableModelsList: List<LLMModel>,
     onDismiss: () -> Unit,
     onUpdateTask: (Task) -> Unit,
@@ -86,7 +84,12 @@ fun EditTaskDialog(
     var systemPrompt by remember { mutableStateOf(selectedTask.systemPrompt) }
     var isModelListDialogVisible by remember { mutableStateOf(false) }
     val (focusRequestor) = FocusRequester.createRefs()
-    var selectedModel by remember { mutableStateOf(selectedTaskModel) }
+    var selectedModel by remember {
+        mutableStateOf(
+            availableModelsList.find { it.id == selectedTask.modelId }
+                ?: LLMModel(name = selectedTask.modelName, id = selectedTask.modelId)
+        )
+    }
     val keyboardController = LocalSoftwareKeyboardController.current
     Surface {
         Dialog(onDismissRequest = onDismiss) {
@@ -150,7 +153,7 @@ fun EditTaskDialog(
                             .border(width = 1.dp, Color.DarkGray)
                             .clickable { isModelListDialogVisible = true }
                             .padding(8.dp),
-                    text = selectedTaskModel.name,
+                    text = selectedModel.name,
                 )
 
                 if (isModelListDialogVisible) {

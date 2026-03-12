@@ -23,6 +23,7 @@ import androidx.activity.enableEdgeToEdge
 import com.aigentik.app.llm.ModelsRepository
 import com.aigentik.app.ui.screens.chat.ChatActivity
 import com.aigentik.app.ui.screens.model_download.DownloadModelActivity
+import kotlinx.coroutines.runBlocking
 import org.koin.android.ext.android.inject
 
 class MainActivity : ComponentActivity() {
@@ -34,7 +35,8 @@ class MainActivity : ComponentActivity() {
 
         // Redirect user to the DownloadModelActivity if no models are available
         // as the app requires at least one model to function
-        if (modelsRepository.getAvailableModelsList().isEmpty()) {
+        val models = runBlocking { modelsRepository.getAvailableModelsList() }
+        if (models.isEmpty()) {
             Intent(this, DownloadModelActivity::class.java).apply {
                 startActivity(this)
                 finish()
