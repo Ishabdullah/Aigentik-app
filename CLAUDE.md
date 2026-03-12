@@ -213,3 +213,68 @@ The research documentation files in this repo are as important as the code. Keep
 - **Firebase / Google Cloud project:** aigentik-android
 - **Package name:** com.aigentik.app
 - **Credentials match:** Both aigentik-app and aigentik-android use the same Firebase project and OAuth client. Do not split them without updating both repos.
+
+---
+
+## Fusion Strategy — READ THIS BEFORE TOUCHING AGENT CODE
+
+**aigentik-app is a fusion of two projects:**
+1. **SmolChat-Android** (base) — Jetpack Compose UI, llama.cpp JNI via `smollm` module, GGUF model download, Room DB for chats. Keep this untouched.
+2. **aigentik-android** (agent layer) — production SMS/RCS via NotificationListenerService inline reply, Gmail OAuth2 + REST API, Google Voice routing, MessageEngine routing hub, ContactEngine, RuleEngine, AdminAuth, ChannelManager.
+
+**The source files for the agent layer already exist and are proven.** Do not rewrite them. Copy from:
+`/data/data/com.termux/files/home/aigentik-android/app/src/main/java/com/aigentik/app/`
+
+**Adaptation work when copying:**
+- Both projects use `com.aigentik.app` as base package — package declarations rarely need changing
+- Convert `object` singletons to `@Single class` for Koin where the class needs injection
+- Replace `AiEngine` calls with `AgentLLMFacade` (wrapper around `SmolLMManager`) in `MessageEngine`
+- Merge Room entities into single `AppRoomDatabase` (don't create separate databases)
+- `ChatDatabase` references → `AppDB.addAssistantMessage()`
+
+**Detailed plan:** See `aigentik-fuse.md` (bottom section: "Staged Implementation Plan")
+**Session log:** See `DEVLOG.md` — read this first to know where the last session left off
+
+---
+
+## Current Implementation State (updated 2026-03-12)
+
+### What is working on device
+- Jetpack Compose UI, model download, llama.cpp inference — fully working (SmolChat base)
+- `AigentikService` foreground service — running, shows persistent notification, keeps process alive on Samsung
+- `BootReceiver` — restarts service on boot/package-replace
+- `AigentikNotificationListener` — confirmed binding (`onListenerConnected` fires), receives SMS/RCS notifications from Google Messages and Samsung Messages
+- Battery optimization exemption — requested on first launch
+
+### What is NOT yet working
+- SMS/RCS → AI reply pipeline: notifications received but not yet routed to LLM and replied
+- Gmail: OAuth wired but `GmailApiClient`/`EmailMonitor` not yet ported
+- Admin commands, RuleEngine, ContactEngine — not yet ported
+
+### Current package structure for agent files
+```
+com.aigentik.app.core/       — AigentikSettings, PhoneNormalizer, ChannelManager,
+                                MessageDeduplicator, AigentikService (foreground service)
+com.aigentik.app.sms/        — AigentikNotificationListener, NotificationReplyRouter,
+                                SMSService (read-only Telephony queries, keep)
+com.aigentik.app.agent/      — AgentMessageEngine (stub, replaced by MessageEngine in Stage 1)
+com.aigentik.app.system/     — BootReceiver, ConnectionWatchdog
+com.aigentik.app.ai/         — AgentLLMFacade (Stage 1, wraps SmolLMManager)
+com.aigentik.app.email/      — Gmail files (Stage 2)
+com.aigentik.app.auth/       — GoogleAuthManager (Stage 2)
+```
+
+### How to pick up in a fresh session
+1. Read `DEVLOG.md` — last entry tells you exactly where to start
+2. Read `aigentik-fuse.md` bottom section — check off completed items, find next unchecked item
+3. Source files to copy are in `/data/data/com.termux/files/home/aigentik-android/`
+4. Build happens in GitHub Actions (CI) — do NOT run `./gradlew` locally
+5. Push with SSH: `git push origin main`
+6. After pushing, test with: `adb logcat -s AigentikNotifListener AigentikService NotificationAdapter`
+
+### Key architectural rules (in addition to rules above)
+- **AigentikSettings.init(context) must be called first** in `AigentikService.onCreate()` before any engine that reads settings
+- **MessageEngine.configure() must be called BEFORE EmailMonitor.init()** — if a Gmail notification arrives between them, it processes with null wakeLock (Samsung throttles inference to 5+ min)
+- **NotificationReplyRouter.appContext** must be set in `onListenerConnected()` — this is what `NotificationAdapter` does on bind. Without it, `PendingIntent.send()` fails on Android 13+
+- **Never add remote inference** — all LLM calls go through `SmolLMManager` in the `smollm` module
+- **All agent actions go through policy engine** — DestructiveActionGuard now, full ActionPolicyEngine in Phase I research

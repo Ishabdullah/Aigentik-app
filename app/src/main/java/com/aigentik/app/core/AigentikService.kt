@@ -26,6 +26,7 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aigentik.app.R
+import com.aigentik.app.system.ConnectionWatchdog
 
 /**
  * Foreground service that keeps the Aigentik process alive on Samsung and other
@@ -61,6 +62,9 @@ class AigentikService : Service() {
         super.onCreate()
         Log.i(TAG, "AigentikService onCreate")
 
+        // Init settings FIRST — every engine reads from AigentikSettings
+        AigentikSettings.init(this)
+
         // PARTIAL_WAKE_LOCK — keeps CPU running at full speed in background.
         // Samsung throttles background processes to ~20% CPU without this,
         // increasing LLM inference time from ~30s to 5+ minutes.
@@ -69,8 +73,16 @@ class AigentikService : Service() {
         wakeLock?.acquire()
 
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Aigentik is active"))
+        startForeground(NOTIFICATION_ID, buildNotification("${AigentikSettings.agentName} is active"))
+
+        // Load channel states from persisted settings
+        ChannelManager.loadFromSettings()
+
+        // Start OAuth session watchdog (OAuth checks stubbed until Stage 2)
+        ConnectionWatchdog.start(this)
+
         Log.i(TAG, "Foreground service started — process will stay alive")
+        // TODO Stage 1: init ContactEngine, load SmolLMManager model, configure MessageEngine
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -80,6 +92,7 @@ class AigentikService : Service() {
 
     override fun onDestroy() {
         Log.w(TAG, "AigentikService onDestroy — service is being stopped")
+        ConnectionWatchdog.stop()
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }

@@ -1,201 +1,143 @@
-/*
- * Copyright (C) 2024 Aigentik
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.aigentik.app.sms
 
 import android.app.Notification
-import android.os.Build
-import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import com.aigentik.app.BuildConfig
 import com.aigentik.app.agent.AgentMessageEngine
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import org.koin.android.ext.android.inject
+import com.aigentik.app.core.ChannelManager
+import com.aigentik.app.core.MessageDeduplicator
+import com.aigentik.app.core.PhoneNormalizer
+import java.util.concurrent.ConcurrentHashMap
 
-/**
- * NotificationListenerService that intercepts SMS/RCS (Google Messages, Samsung Messages)
- * and Gmail notifications, then routes them to [AgentMessageEngine].
- *
- * Design: thin adapter — extract raw data, deduplicate, register reply capability, forward.
- * All routing logic lives in injectable classes (AgentMessageEngine, NotificationReplyRouter,
- * MessageDeduplicator) so they can be tested without a real device.
- *
- * IMPORTANT: android:exported="true" is required in AndroidManifest.xml so the OS can bind
- * this service. The BIND_NOTIFICATION_LISTENER_SERVICE permission gates who can bind it.
- */
+// NotificationAdapter v1.5 — adapted from aigentik-android NotificationAdapter
+// v1.5: ConcurrentHashMap for activeNotifications (thread safety on notification bursts)
+// v1.4: Self-reply prevention via wasSentRecently()
+// v1.3: Gmail notifications routed to EmailMonitor stub (wired in Stage 2)
+// v1.2: ALWAYS register with NotificationReplyRouter even if duplicate
+// Adaptation: uses AgentMessageEngine.onMessageReceived() instead of MessageEngine
+//             (MessageEngine ported in Stage 1, replaces AgentMessageEngine stub)
 class AigentikNotificationListener : NotificationListenerService() {
-
-    private val agentMessageEngine: AgentMessageEngine by inject()
-    private val notificationReplyRouter: NotificationReplyRouter by inject()
-    private val messageDeduplicator: MessageDeduplicator by inject()
-
-    // Backward-compat StateFlow — UI layer can still observe raw notification events
-    private val _incomingMessages = MutableStateFlow<List<IncomingNotification>>(emptyList())
-    val incomingMessages: StateFlow<List<IncomingNotification>> = _incomingMessages.asStateFlow()
 
     companion object {
         private const val TAG = "AigentikNotifListener"
 
-        /** Messaging apps whose notifications carry SMS/RCS inline-reply actions */
-        val SMS_PACKAGES = setOf(
-            "com.google.android.apps.messaging",   // Google Messages (SMS + RCS)
-            "com.samsung.android.messaging",        // Samsung Messages (SMS + RCS)
-            "com.android.mms",                      // Stock AOSP Messaging
+        private val MESSAGING_PACKAGES = setOf(
+            "com.google.android.apps.messaging",
+            "com.samsung.android.messaging",
         )
-
-        const val GMAIL_PACKAGE = "com.google.android.gm"
+        private const val GMAIL_PACKAGE  = "com.google.android.gm"
+        private const val KEY_TITLE      = "android.title"
+        private const val KEY_TEXT       = "android.text"
+        private const val KEY_BIG_TEXT   = "android.bigText"
     }
 
-    // ── NotificationListenerService callbacks ────────────────────────────────
+    // ConcurrentHashMap: onNotificationPosted and onNotificationRemoved may run on
+    // different threads — plain LinkedHashMap caused ConcurrentModificationException.
+    private val activeNotifications = ConcurrentHashMap<String, StatusBarNotification>()
 
+    // Set context IMMEDIATELY when service binds — before any notification arrives.
+    // NotificationReplyRouter.appContext must be non-null for PendingIntent.send() on Android 13+.
     override fun onListenerConnected() {
         super.onListenerConnected()
-        Log.i(TAG, "NotificationListenerService connected — ready to receive notifications")
+        NotificationReplyRouter.appContext = applicationContext
+        Log.i(TAG, "NotificationListenerService connected — appContext set for PendingIntent")
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
-        Log.w(TAG, "NotificationListenerService disconnected — OS unbound the service")
+        NotificationReplyRouter.appContext = null
+        Log.w(TAG, "NotificationListenerService disconnected — appContext cleared")
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        // Skip group summary notifications — these are collapsed headers, not real messages
+        // Gmail → route to EmailMonitor (Stage 2)
+        if (sbn.packageName == GMAIL_PACKAGE) {
+            val isGroupSummary = sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
+            if (isGroupSummary) return
+            Log.i(TAG, "Gmail notification detected — EmailMonitor wired in Stage 2")
+            // TODO Stage 2: EmailMonitor.onGmailNotification(applicationContext)
+            return
+        }
+
+        if (sbn.packageName !in MESSAGING_PACKAGES) return
+
         val isGroupSummary = sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
         if (isGroupSummary) return
 
-        when (sbn.packageName) {
-            in SMS_PACKAGES -> handleSmsNotification(sbn)
-            GMAIL_PACKAGE   -> handleGmailNotification(sbn)
+        if (!ChannelManager.isEnabled(ChannelManager.Channel.SMS)) {
+            Log.d(TAG, "SMS channel disabled — skipping notification")
+            return
         }
+
+        val extras = sbn.notification.extras ?: return
+        val title = extras.getString(KEY_TITLE) ?: return
+        val text  = extras.getCharSequence(KEY_BIG_TEXT)?.toString()
+            ?: extras.getCharSequence(KEY_TEXT)?.toString()
+            ?: return
+
+        // Self-reply prevention: Samsung updates the conversation notification after
+        // we send an inline reply, showing our reply as the "latest message".
+        // Skip it to prevent self-reply loop.
+        if (MessageDeduplicator.wasSentRecently(text)) {
+            Log.d(TAG, "Skipping — body matches recently sent reply (self-reply prevention)")
+            return
+        }
+
+        val timestamp = sbn.postTime
+        val sender    = resolveSender(title)
+
+        Log.d(TAG, "Notification from '$title' resolved sender: $sender pkg: ${sbn.packageName}")
+
+        val dedupKey = MessageDeduplicator.fingerprint(sender, text, timestamp)
+
+        // ALWAYS register with NotificationReplyRouter — even if duplicate.
+        // The inline reply path needs the notification registered to fire reply.
+        activeNotifications[dedupKey] = sbn
+        if (activeNotifications.size > 50) activeNotifications.remove(activeNotifications.keys.first())
+        NotificationReplyRouter.register(dedupKey, sbn.notification, sbn.packageName, sbn.key)
+
+        // Only send to engine if not already processed
+        val isNew = MessageDeduplicator.isNew(sender, text, timestamp)
+        if (!isNew) {
+            Log.d(TAG, "Duplicate — router registered, skipping engine")
+            return
+        }
+
+        // Route to AgentMessageEngine (stub in Stage pre-work → replaced by MessageEngine in Stage 1)
+        val channel = if (sbn.packageName == "com.android.mms")
+            AgentMessageEngine.Channel.SMS else AgentMessageEngine.Channel.RCS
+
+        AgentMessageEngine.onMessageReceived(
+            AgentMessageEngine.InboundMessage(
+                channel     = channel,
+                packageName = sbn.packageName,
+                sender      = sender,
+                senderRaw   = title,
+                body        = text,
+                sbnKey      = sbn.key,
+                timestamp   = timestamp,
+                dedupKey    = dedupKey,
+            )
+        )
+        Log.i(TAG, "SMS/RCS notification → AgentMessageEngine: $dedupKey")
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
-        if (sbn.packageName in SMS_PACKAGES) {
-            notificationReplyRouter.onNotificationRemoved(sbn.key)
-            _incomingMessages.value =
-                _incomingMessages.value.filter { it.timestamp != sbn.postTime }
-        }
+        activeNotifications.entries.removeIf { it.value.key == sbn.key }
+        NotificationReplyRouter.onNotificationRemoved(sbn.key)
     }
 
-    // ── Handlers ─────────────────────────────────────────────────────────────
-
-    private fun handleSmsNotification(sbn: StatusBarNotification) {
-        try {
-            val notification = sbn.notification
-            val extras = notification.extras
-
-            val title = extractText(extras, "android.title", "android.title.big")
-            val body = extractText(extras, "android.text", "android.bigText", "android.infoText")
-                ?: notification.tickerText?.toString()
-
-            if (body.isNullOrBlank()) return
-
-            val sender = title ?: sbn.packageName
-
-            // Guard: skip if this body was recently sent as an outgoing reply
-            // (Samsung re-posts the conversation notification after inline reply)
-            if (notificationReplyRouter.wasSentRecently(body)) {
-                if (BuildConfig.DEBUG) Log.d(TAG, "Skipping own sent message from $sender")
-                return
-            }
-
-            // Guard: skip true duplicates (same body/sender within TTL)
-            if (messageDeduplicator.isDuplicate(sbn.packageName, sender, body)) {
-                if (BuildConfig.DEBUG) Log.d(TAG, "Duplicate suppressed from $sender")
-                return
-            }
-
-            // Register the inline-reply capability for this notification (Android 7+)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                notification.actions?.forEach { action ->
-                    val remoteInput = action.remoteInputs?.firstOrNull() ?: return@forEach
-                    val pi = action.actionIntent ?: return@forEach
-                    notificationReplyRouter.registerReplyAction(
-                        sbnKey = sbn.key,
-                        packageName = sbn.packageName,
-                        pendingIntent = pi,
-                        remoteInputKey = remoteInput.resultKey,
-                    )
-                }
-            }
-
-            // Classify channel: stock MMS app = SMS only; Google/Samsung Messages = RCS capable
-            val channel = if (sbn.packageName == "com.android.mms")
-                AgentMessageEngine.Channel.SMS
-            else
-                AgentMessageEngine.Channel.RCS
-
-            agentMessageEngine.onMessageReceived(
-                AgentMessageEngine.InboundMessage(
-                    channel = channel,
-                    packageName = sbn.packageName,
-                    sender = sender,
-                    senderRaw = sender,
-                    body = body,
-                    sbnKey = sbn.key,
-                    timestamp = sbn.postTime,
-                )
-            )
-
-            // Update backward-compat flow for any UI observing raw notifications
-            val isClearable = (notification.flags and Notification.FLAG_ONGOING_EVENT) == 0
-            _incomingMessages.value = _incomingMessages.value + IncomingNotification(
-                packageName = sbn.packageName,
-                title = title,
-                message = body,
-                timestamp = sbn.postTime,
-                isClearable = isClearable,
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling SMS/RCS notification", e)
+    private fun resolveSender(title: String): String {
+        if (PhoneNormalizer.looksLikePhoneNumber(title)) return PhoneNormalizer.toE164(title)
+        val phoneRegex = Regex("""[\+\d][\d\s\-\(\)\.]{7,}""")
+        val phoneMatch = phoneRegex.find(title)
+        if (phoneMatch != null) {
+            val candidate = phoneMatch.value
+            if (PhoneNormalizer.looksLikePhoneNumber(candidate)) return PhoneNormalizer.toE164(candidate)
         }
-    }
-
-    private fun handleGmailNotification(sbn: StatusBarNotification) {
-        // Step 2: will wire EmailMonitor here to trigger Gmail delta-fetch
-        if (BuildConfig.DEBUG) Log.d(TAG, "Gmail notification from ${sbn.packageName} — wiring in Step 2")
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    private fun extractText(extras: Bundle, vararg keys: String): String? {
-        for (key in keys) {
-            val cs = extras.getCharSequence(key)
-            if (!cs.isNullOrBlank()) return cs.toString().trim()
-        }
-        return null
+        // TODO Stage 1: ContactEngine.findContact(title) for name → phone resolution
+        Log.w(TAG, "Could not resolve phone for '$title' — using name as sender ID")
+        return title
     }
 }
-
-// ── Backward-compat data classes ─────────────────────────────────────────────
-
-data class IncomingNotification(
-    val packageName: String,
-    val title: String?,
-    val message: String?,
-    val timestamp: Long,
-    val isClearable: Boolean,
-)
-
-data class ReplyAction(
-    val title: String,
-    val pendingIntent: android.app.PendingIntent?,
-    val remoteInput: android.app.RemoteInput?,
-)

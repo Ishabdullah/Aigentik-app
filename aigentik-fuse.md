@@ -635,3 +635,167 @@ aigentik-android adds `javamail.android` and `javamail.activation` for MIME mess
 ---
 
 *End of report.*
+
+---
+
+# Staged Implementation Plan
+**Added:** 2026-03-12
+**Strategy:** Copy files from `aigentik-android/` verbatim, change package if needed, convert `object` → `@Single class` for Koin, wire integration points. Do NOT rewrite what already works.
+**Source directory:** `/data/data/com.termux/files/home/aigentik-android/app/src/main/java/com/aigentik/app/`
+**Dev log:** `DEVLOG.md` in project root — update at end of every session.
+
+---
+
+## Pre-Work: Bulk Copy (Required Before Any Stage) ✅ IN PROGRESS
+
+These files have no inter-dependencies on unbuilt stages. Copy verbatim, compile, get green build.
+
+**Copy to `com.aigentik.app.core`:**
+- ✅ `AigentikSettings.kt` — SharedPreferences wrapper; agent name, owner, admin number, model path, OAuth state. `init(context)` called from `AigentikService.onCreate()`. Every engine reads this.
+- ✅ `PhoneNormalizer.kt` — E.164 normalization via `PhoneNumberUtils`. Used by `NotificationAdapter` and `ContactEngine`.
+- ✅ `ChannelManager.kt` — SMS/GVOICE/EMAIL enable/disable with persistence via `AigentikSettings`. `loadFromSettings()` called from `AigentikService`.
+- ✅ `MessageDeduplicator.kt` — body-only fingerprint (no timestamp), `markSent()`/`wasSentRecently()` for Samsung post-reply loop prevention. Replaces our hand-written version in `sms/`.
+
+**Replace our rewrites with aigentik-android originals:**
+- ✅ `NotificationReplyRouter.kt` — aigentik-android version has REPLY_KEYS lookup table (Samsung vs Google Messages key names), dual messageId+sbnKey map, proven `send(ctx, 0, intent)` call
+- ✅ `AigentikNotificationListener.kt` → replaced with aigentik-android `NotificationAdapter` logic: `onListenerConnected()` sets context on `NotificationReplyRouter`, `FLAG_GROUP_SUMMARY` skip, `ChannelManager` gate, `resolveSender()` using `PhoneNormalizer` + `ContactEngine`
+
+**Create stubbed (activated in Stage 2):**
+- ✅ `ConnectionWatchdog.kt` — OAuth session monitor; OAuth checks stubbed for Stage 2, `start()`/`stop()` wired in `AigentikService`
+
+**Update:**
+- ✅ `AigentikService.kt` — add `AigentikSettings.init()`, `ChannelManager.loadFromSettings()`, `ConnectionWatchdog.start()`
+- ✅ Manifest — update service declaration if class renamed
+
+**Test for Pre-Work:**
+- App builds and launches
+- Foreground service notification visible
+- Send SMS → `adb logcat -s NotificationAdapter` shows message received and logged
+- `adb logcat -s AigentikNotifListener` shows `connected` on launch
+
+---
+
+## Stage 1: SMS/RCS Receive + AI Reply ⬜
+
+**Goal:** Send an SMS to the phone, get an AI-generated reply back.
+
+**Files to copy from aigentik-android:**
+- ⬜ `core/ContactEngine.kt` — phone/name lookup with `CopyOnWriteArrayList` cache. Add `Contact` entity to `AppRoomDatabase`, bump db version to 2.
+- ⬜ `core/ChatBridge.kt` — adapted to write to `AppDB.addAssistantMessage()` instead of separate `ChatDatabase`
+- ⬜ `ai/AiEngine.kt` — reference only; create `ai/AgentLLMFacade.kt` wrapping `SmolLMManager` with named generation methods: `generateSmsReply()`, `generateEmailReply()`, `generateChatReply()`, `interpretCommand()`. Port Qwen3 `<think>` prefill trick verbatim.
+- ⬜ `core/MessageEngine.kt` — central routing hub. Copy verbatim, convert `object` → `@Single`, replace `AiEngine` calls with `AgentLLMFacade`. SMS path fully wired. Email path stubbed.
+- ⬜ `core/AdminAuthManager.kt` — SHA-256 password, 30-min session. Needed even in Stage 1 so admin can send test commands via SMS.
+- ⬜ Update `AigentikService.kt` — init `ContactEngine`, load model via `SmolLMManager`, call `MessageEngine.configure()` with wake lock
+- ⬜ Replace `AgentMessageEngine` stub — wire to `MessageEngine.onMessageReceived()` (or delete and use MessageEngine directly)
+
+**Test for Stage 1:**
+1. Load a model in the app
+2. Send SMS to device from another phone
+3. Confirm AI reply arrives back via Samsung/Google Messages ← **this is the first real end-to-end test**
+4. Send `Admin: [name]\nPassword: [pw]\nstatus` → confirm status reply via SMS
+5. Background app, wait 2 min, send SMS → confirm reply still works (service alive)
+
+---
+
+## Stage 2: Gmail Receive + AI Reply ⬜
+
+**Goal:** Receive an email, get an AI-generated reply sent back.
+
+**Files to copy from aigentik-android:**
+- ⬜ `auth/GoogleAuthManager.kt` — `UserRecoverableAuthException` handling is critical; without it Gmail scopes silently fail
+- ⬜ `email/GmailApiClient.kt` (641 lines) — full REST client, OkHttp, recursive MIME, batchModify, GVoice detection
+- ⬜ `email/GmailHistoryClient.kt` — delta-based history fetch, `PrimeResult` enum
+- ⬜ `email/EmailMonitor.kt` — `AtomicBoolean` duplicate-fetch prevention, `CoroutineExceptionHandler`
+- ⬜ `email/EmailRouter.kt` — GVoice routing, `ConcurrentHashMap` context map
+- ⬜ Wire `AigentikNotificationListener.handleGmailNotification()` → `EmailMonitor.onGmailNotification()` (stub already in place)
+- ⬜ Update `MessageEngine.kt` — enable email path
+- ⬜ Update `AigentikService.kt` — add `EmailMonitor.init()`, `EmailRouter.init()`, `GmailHistoryClient.primeHistoryId()` AFTER `MessageEngine.configure()`
+- ⬜ Activate `ConnectionWatchdog` OAuth checks — `GoogleAuthManager` now exists
+- ⬜ Add sign-in UI to existing settings screen in Compose
+
+**Test for Stage 2:**
+1. Sign in with Google in the app
+2. Send email to Gmail account
+3. Confirm Gmail notification → `EmailMonitor` fetch → AI reply sent back
+4. `Admin: ...\ncheck my emails` via SMS → confirm Gmail count returned via SMS reply
+
+---
+
+## Stage 3: Google Voice ⬜
+
+**Goal:** Receive GVoice SMS (as Gmail email), reply via Gmail.
+
+**No new files needed** — GVoice detection is built into `GmailApiClient` (`isGoogleVoiceText()`, `parseGoogleVoiceEmail()`). `EmailRouter.replyToGoogleVoiceText()` already exists.
+
+**Changes:**
+- ⬜ Enable `ChannelManager.Channel.GVOICE` default = true
+- ⬜ Wire GVoice path in `MessageEngine.handlePublicMessage()` (likely already wired, just needs testing)
+
+**Test for Stage 3:**
+1. Send text to GVoice number from another phone
+2. Confirm GVoice email arrives → `isGoogleVoiceText()` detects it → AI SMS reply sent back through Gmail
+
+---
+
+## Stage 4: Admin Commands + Destructive Action Guard ⬜
+
+**Goal:** Full admin command set over SMS and email. Two-step confirmation for irreversible Gmail operations.
+
+**Files to copy from aigentik-android:**
+- ⬜ `core/DestructiveActionGuard.kt` — two-step confirmation, 5-min expiry, common-word exclusion list
+- ⬜ Full admin command dispatch in `MessageEngine.handleAdminCommand()` — list unread, search, trash, mark read, spam, unsubscribe, contact management, channel toggles
+
+**Test for Stage 4:**
+1. `Admin: ...\nlist unread` → get email list via SMS
+2. `Admin: ...\ndelete all from spam@example.com` → confirm two-step guard fires, confirm on second message
+3. `Admin: ...\ndisable email` → confirm `ChannelManager` toggles off
+
+---
+
+## Stage 5: Rule Engine + Full Contact Intelligence ⬜
+
+**Goal:** Automated filtering. Spam blocked before LLM. Per-contact behavior profiles.
+
+**Files to copy from aigentik-android:**
+- ⬜ `core/RuleEngine.kt` — add `Rule` entity to `AppRoomDatabase`, bump db version. Promotional auto-detection (unsubscribe link) saves LLM calls.
+- ⬜ `ContactEngine.kt` full feature set — `instructions`, `replyBehavior` (AUTO/ALWAYS/NEVER/REVIEW), `relationship`, `aliases`
+- ⬜ Add Rule management UI screen in Compose
+- ⬜ Add Contact detail UI screen in Compose (per-contact instructions)
+
+**Test for Stage 5:**
+1. Add rule: number → action=NEVER → confirm messages dropped
+2. Add rule: domain=marketing.com → action=SPAM → confirm no LLM call
+3. Set contact `replyBehavior=REVIEW` → confirm held for approval
+4. `Admin: ...\ntext mom I'll be late` → confirm relationship lookup resolves to correct contact
+
+---
+
+## File Status Tracker
+
+| File | Source | Stage | Status |
+|------|--------|-------|--------|
+| `AigentikService.kt` | new | Pre | ✅ done |
+| `BootReceiver.kt` | new | Pre | ✅ done |
+| `AigentikNotificationListener.kt` | adapted | Pre | ✅ done (needs update) |
+| `NotificationReplyRouter.kt` (sms/) | adapted | Pre | ✅ done (needs replace) |
+| `MessageDeduplicator.kt` (sms/) | adapted | Pre | ✅ done (needs replace) |
+| `AgentMessageEngine.kt` | new stub | Pre→1 | ✅ done (replace with MessageEngine in S1) |
+| `ic_notification.xml` | new | Pre | ✅ done |
+| `notification_listener.xml` | ported | Pre | ✅ done |
+| `AigentikSettings.kt` | android | Pre | ✅ done |
+| `PhoneNormalizer.kt` | android | Pre | ✅ done |
+| `ChannelManager.kt` | android | Pre | ✅ done |
+| `MessageDeduplicator.kt` (core/) | android | Pre | ✅ done |
+| `NotificationReplyRouter.kt` (sms/ replaced) | android | Pre | ✅ done |
+| `ConnectionWatchdog.kt` (stubbed) | android | Pre | ✅ done |
+| `ContactEngine.kt` | android | 1 | ⬜ |
+| `AgentLLMFacade.kt` | new (wraps SmolLMManager) | 1 | ⬜ |
+| `MessageEngine.kt` | android | 1 | ⬜ |
+| `AdminAuthManager.kt` | android | 1 | ⬜ |
+| `GoogleAuthManager.kt` | android | 2 | ⬜ |
+| `GmailApiClient.kt` | android | 2 | ⬜ |
+| `GmailHistoryClient.kt` | android | 2 | ⬜ |
+| `EmailMonitor.kt` | android | 2 | ⬜ |
+| `EmailRouter.kt` | android | 2 | ⬜ |
+| `DestructiveActionGuard.kt` | android | 4 | ⬜ |
+| `RuleEngine.kt` | android | 5 | ⬜ |
