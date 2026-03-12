@@ -72,6 +72,25 @@
         <activity android:name=".ui.screens.model_download.DownloadModelActivity" />
         <activity android:name=".ui.screens.manage_tasks.ManageTasksActivity" />
         
+        <!-- Foreground service — keeps process alive on Samsung and other aggressive OEMs -->
+        <service
+            android:name=".core.AigentikService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Boot receiver — restarts AigentikService after reboot or APK update -->
+        <receiver
+            android:name=".system.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
         <!-- Notification Listener Service for SMS/RCS/Gmail integration -->
         <!-- exported=true is required: the OS must be able to bind this service -->
         <service

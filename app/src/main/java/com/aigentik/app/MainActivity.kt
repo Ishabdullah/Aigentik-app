@@ -17,9 +17,14 @@
 package com.aigentik.app
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
+import com.aigentik.app.core.AigentikService
 import com.aigentik.app.llm.ModelsRepository
 import com.aigentik.app.ui.screens.chat.ChatActivity
 import com.aigentik.app.ui.screens.model_download.DownloadModelActivity
@@ -29,9 +34,33 @@ import org.koin.android.ext.android.inject
 class MainActivity : ComponentActivity() {
     private val modelsRepository by inject<ModelsRepository>()
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Start the foreground service to keep the process alive on Samsung devices.
+        // Without this, the OS kills the app within seconds of leaving the screen,
+        // which unbinds AigentikNotificationListener and drops all incoming messages.
+        startForegroundService(Intent(this, AigentikService::class.java))
+        Log.i(TAG, "AigentikService start requested")
+
+        // Request battery optimization exemption — lets the service and notification
+        // listener stay alive without Samsung's aggressive background killing.
+        // User sees a system dialog; we don't force it, just request once.
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                })
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not request battery optimization exemption: ${e.message}")
+            }
+        }
 
         // Redirect user to the DownloadModelActivity if no models are available
         // as the app requires at least one model to function
