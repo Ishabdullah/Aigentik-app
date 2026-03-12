@@ -17,207 +17,171 @@
 package com.aigentik.app.sms
 
 import android.app.Notification
-import android.app.RemoteInput
-import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.aigentik.app.BuildConfig
+import com.aigentik.app.agent.AgentMessageEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.koin.android.ext.android.inject
 
 /**
- * NotificationListenerService to intercept SMS/RCS notifications from:
- * - Google Messages (com.google.android.apps.messaging)
- * - Samsung Messages (com.samsung.android.messaging)
- * - Other messaging apps
+ * NotificationListenerService that intercepts SMS/RCS (Google Messages, Samsung Messages)
+ * and Gmail notifications, then routes them to [AgentMessageEngine].
  *
- * This service enables AI-powered reply suggestions and auto-replies.
+ * Design: thin adapter — extract raw data, deduplicate, register reply capability, forward.
+ * All routing logic lives in injectable classes (AgentMessageEngine, NotificationReplyRouter,
+ * MessageDeduplicator) so they can be tested without a real device.
+ *
+ * IMPORTANT: android:exported="true" is required in AndroidManifest.xml so the OS can bind
+ * this service. The BIND_NOTIFICATION_LISTENER_SERVICE permission gates who can bind it.
  */
 class AigentikNotificationListener : NotificationListenerService() {
 
-    companion object {
-        private const val TAG = "AigentikNotificationListener"
+    private val agentMessageEngine: AgentMessageEngine by inject()
+    private val notificationReplyRouter: NotificationReplyRouter by inject()
+    private val messageDeduplicator: MessageDeduplicator by inject()
 
-        // Supported messaging app packages
-        val SUPPORTED_PACKAGES = setOf(
-            "com.google.android.apps.messaging",      // Google Messages
-            "com.samsung.android.messaging",          // Samsung Messages
-            "com.android.mms",                         // Stock Android Messaging
-            "com.whatsapp",                            // WhatsApp
-            "com.whatsapp.w4b",                        // WhatsApp Business
-            "org.telegram.messenger",                  // Telegram
-            "com.facebook.orca",                       // Messenger
-            "com.snapchat.android"                     // Snapchat
-        )
-
-        // Key strings for extracting notification content
-        val NOTIFICATION_TITLE_KEYS = setOf(
-            "android.title",
-            "android.title.big"
-        )
-
-        val NOTIFICATION_TEXT_KEYS = setOf(
-            "android.text",
-            "android.bigText",
-            "android.infoText"
-        )
-    }
-
+    // Backward-compat StateFlow — UI layer can still observe raw notification events
     private val _incomingMessages = MutableStateFlow<List<IncomingNotification>>(emptyList())
     val incomingMessages: StateFlow<List<IncomingNotification>> = _incomingMessages.asStateFlow()
 
-    private val _replyActions = MutableStateFlow<List<ReplyAction>>(emptyList())
-    val replyActions: StateFlow<List<ReplyAction>> = _replyActions.asStateFlow()
+    companion object {
+        private const val TAG = "AigentikNotifListener"
+
+        /** Messaging apps whose notifications carry SMS/RCS inline-reply actions */
+        val SMS_PACKAGES = setOf(
+            "com.google.android.apps.messaging",   // Google Messages (SMS + RCS)
+            "com.samsung.android.messaging",        // Samsung Messages (SMS + RCS)
+            "com.android.mms",                      // Stock AOSP Messaging
+        )
+
+        const val GMAIL_PACKAGE = "com.google.android.gm"
+    }
+
+    // ── NotificationListenerService callbacks ────────────────────────────────
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val packageName = sbn.packageName
-
-        // Check if this is from a supported messaging app
-        if (packageName !in SUPPORTED_PACKAGES) {
-            return
-        }
-
-        try {
-            val notification = sbn.notification
-            val extras = notification.extras
-
-            // Extract notification content
-            val title = extractTextFromExtras(extras, NOTIFICATION_TITLE_KEYS)
-            val text = extractTextFromExtras(extras, NOTIFICATION_TEXT_KEYS)
-            val ticker = notification.tickerText?.toString()
-
-            if (BuildConfig.DEBUG) Log.d(TAG, "Notification from $packageName: title=$title, text=$text")
-
-            // Check for quick reply actions (RCS support)
-            val replyActions = extractReplyActions(notification)
-            if (replyActions.isNotEmpty()) {
-                _replyActions.value = replyActions
-            }
-
-            // Create incoming message notification
-            // FLAG_ONGOING_EVENT means the notification cannot be dismissed — isClearable is the inverse
-            val isClearable = (notification.flags and Notification.FLAG_ONGOING_EVENT) == 0
-            val incomingMsg = IncomingNotification(
-                packageName = packageName,
-                title = title,
-                message = text ?: ticker,
-                timestamp = sbn.postTime,
-                isClearable = isClearable
-            )
-
-            _incomingMessages.value = _incomingMessages.value + incomingMsg
-
-            // Trigger AI reply suggestion
-            if (!text.isNullOrBlank()) {
-                triggerAIReplySuggestion(incomingMsg)
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error processing notification", e)
+        when (sbn.packageName) {
+            in SMS_PACKAGES -> handleSmsNotification(sbn)
+            GMAIL_PACKAGE   -> handleGmailNotification(sbn)
         }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
-        val packageName = sbn.packageName
-        if (packageName !in SUPPORTED_PACKAGES) return
-
-        // Remove from incoming messages when notification is dismissed
-        _incomingMessages.value = _incomingMessages.value.filter { it.timestamp != sbn.postTime }
-    }
-
-    private fun extractTextFromExtras(extras: Bundle, keys: Set<String>): String? {
-        for (key in keys) {
-            val charSequence = extras.getCharSequence(key)
-            if (!charSequence.isNullOrBlank()) {
-                return charSequence.toString().trim()
-            }
+        if (sbn.packageName in SMS_PACKAGES) {
+            notificationReplyRouter.onNotificationRemoved(sbn.key)
+            _incomingMessages.value =
+                _incomingMessages.value.filter { it.timestamp != sbn.postTime }
         }
-        return null
     }
 
-    private fun extractReplyActions(notification: Notification): List<ReplyAction> {
-        val actions = mutableListOf<ReplyAction>()
+    // ── Handlers ─────────────────────────────────────────────────────────────
 
-        // Android 7.0+ direct reply actions
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            notification.actions?.forEach { action ->
-                // remoteInputs is the public API for getting RemoteInput instances on an Action
-                val remoteInput = action.remoteInputs?.firstOrNull()
-                if (remoteInput != null) {
-                    actions.add(
-                        ReplyAction(
-                            title = action.title.toString(),
-                            pendingIntent = action.actionIntent,
-                            remoteInput = remoteInput
-                        )
+    private fun handleSmsNotification(sbn: StatusBarNotification) {
+        try {
+            val notification = sbn.notification
+            val extras = notification.extras
+
+            val title = extractText(extras, "android.title", "android.title.big")
+            val body = extractText(extras, "android.text", "android.bigText", "android.infoText")
+                ?: notification.tickerText?.toString()
+
+            if (body.isNullOrBlank()) return
+
+            val sender = title ?: sbn.packageName
+
+            // Guard: skip if this body was recently sent as an outgoing reply
+            // (Samsung re-posts the conversation notification after inline reply)
+            if (notificationReplyRouter.wasSentRecently(body)) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Skipping own sent message from $sender")
+                return
+            }
+
+            // Guard: skip true duplicates (same body/sender within TTL)
+            if (messageDeduplicator.isDuplicate(sbn.packageName, sender, body)) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Duplicate suppressed from $sender")
+                return
+            }
+
+            // Register the inline-reply capability for this notification (Android 7+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                notification.actions?.forEach { action ->
+                    val remoteInput = action.remoteInputs?.firstOrNull() ?: return@forEach
+                    val pi = action.actionIntent ?: return@forEach
+                    notificationReplyRouter.registerReplyAction(
+                        sbnKey = sbn.key,
+                        packageName = sbn.packageName,
+                        pendingIntent = pi,
+                        remoteInputKey = remoteInput.resultKey,
                     )
                 }
             }
-        }
 
-        return actions
+            // Classify channel: stock MMS app = SMS only; Google/Samsung Messages = RCS capable
+            val channel = if (sbn.packageName == "com.android.mms")
+                AgentMessageEngine.Channel.SMS
+            else
+                AgentMessageEngine.Channel.RCS
+
+            agentMessageEngine.onMessageReceived(
+                AgentMessageEngine.InboundMessage(
+                    channel = channel,
+                    packageName = sbn.packageName,
+                    sender = sender,
+                    senderRaw = sender,
+                    body = body,
+                    sbnKey = sbn.key,
+                    timestamp = sbn.postTime,
+                )
+            )
+
+            // Update backward-compat flow for any UI observing raw notifications
+            val isClearable = (notification.flags and Notification.FLAG_ONGOING_EVENT) == 0
+            _incomingMessages.value = _incomingMessages.value + IncomingNotification(
+                packageName = sbn.packageName,
+                title = title,
+                message = body,
+                timestamp = sbn.postTime,
+                isClearable = isClearable,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling SMS/RCS notification", e)
+        }
     }
 
-    private fun triggerAIReplySuggestion(message: IncomingNotification) {
-        // This will be connected to the LLM for AI-powered reply suggestions
-        // The ViewModel will handle generating suggestions using the loaded model
-        if (BuildConfig.DEBUG) Log.d(TAG, "Triggering AI reply suggestion for notification")
+    private fun handleGmailNotification(sbn: StatusBarNotification) {
+        // Step 2: will wire EmailMonitor here to trigger Gmail delta-fetch
+        if (BuildConfig.DEBUG) Log.d(TAG, "Gmail notification from ${sbn.packageName} — wiring in Step 2")
     }
 
-    /**
-     * Send a quick reply using the notification action
-     */
-    fun sendQuickReply(replyAction: ReplyAction, replyText: String) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            try {
-                val remoteInput = replyAction.remoteInput ?: return
-                val pendingIntent = replyAction.pendingIntent ?: return
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
-                // Build a filled-in Intent with the reply text in the RemoteInput bundle
-                val replyIntent = Intent()
-                val resultBundle = Bundle()
-                resultBundle.putString(remoteInput.resultKey, replyText)
-                RemoteInput.addResultsToIntent(arrayOf(remoteInput), replyIntent, resultBundle)
-
-                pendingIntent.send(this, 0, replyIntent)
-                if (BuildConfig.DEBUG) Log.d(TAG, "Quick reply sent")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending quick reply", e)
-            }
+    private fun extractText(extras: Bundle, vararg keys: String): String? {
+        for (key in keys) {
+            val cs = extras.getCharSequence(key)
+            if (!cs.isNullOrBlank()) return cs.toString().trim()
         }
-    }
-
-    /**
-     * Check if notification listener is enabled
-     */
-    fun isNotificationListenerEnabled(): Boolean {
-        // NotificationListenerService extends Service which extends Context — use 'this' directly
-        val packages = android.provider.Settings.Secure.getString(
-            contentResolver,
-            "enabled_notification_listeners"
-        )
-
-        if (!packages.isNullOrBlank()) {
-            val pkgName = packageName
-            return packages.split(":").any { it.contains(pkgName) }
-        }
-        return false
+        return null
     }
 }
+
+// ── Backward-compat data classes ─────────────────────────────────────────────
 
 data class IncomingNotification(
     val packageName: String,
     val title: String?,
     val message: String?,
     val timestamp: Long,
-    val isClearable: Boolean
+    val isClearable: Boolean,
 )
 
 data class ReplyAction(
     val title: String,
     val pendingIntent: android.app.PendingIntent?,
-    val remoteInput: android.app.RemoteInput?
+    val remoteInput: android.app.RemoteInput?,
 )

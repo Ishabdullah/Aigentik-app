@@ -179,6 +179,7 @@ private fun TasksActivityScreenUI(
                         onDismiss = { showCreateTaskDialog = false },
                         onAddTask = onAddTask,
                     )
+                }
                 if (showEditTaskDialog && selectedTask != null) {
                     EditTaskDialog(
                         selectedTask = selectedTask!!,
