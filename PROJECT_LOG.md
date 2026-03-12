@@ -84,6 +84,21 @@ Priority: Medium (after benchmark infrastructure and policy engine).
 
 ---
 
+**[BUILD] Fixed second build failure — Gradle version mismatch in CI workflow**
+
+Root cause: AGP 8.13.0 requires Gradle 8.13+. The `gradle-wrapper.properties` already specifies `gradle-8.13-bin.zip`, but `.github/workflows/build.yml` overrode it with `gradle-version: "8.9"` via `gradle/actions/setup-gradle@v3`. This caused Gradle 8.9 to be used instead of the wrapper version.
+
+Fix:
+1. Removed `gradle-version: "8.9"` from the `setup-gradle` step — now uses the wrapper's version (8.13) automatically
+2. Changed `gradle assembleDebug` → `./gradlew assembleDebug` — standard practice; uses the project's Gradle wrapper binary directly
+
+Error was:
+```
+Minimum supported Gradle version is 8.13. Current version is 8.9.
+```
+
+---
+
 ## Template for Future Entries
 
 ```
