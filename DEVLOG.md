@@ -96,6 +96,10 @@ Read files from aigentik-android:
 3. **SMS from admin number**: Should route to handleAdminCommand; try "status" → should reply with AI/contact/channel status
 4. **Admin via SMS**: Send `Admin: YourName\nPassword: xxxx\nstatus` → auth + command in one message
 
+### Session 3 Addendum: Model Path Auto-Bridge
+
+- `AigentikService.resolveModelPath()` — checks `AigentikSettings.modelPath` first; if blank, queries `AppDB.getModelsList()` via `GlobalContext.get().get<AppDB>()` and uses first downloaded model's path. Caches result in `AigentikSettings.modelPath` for future restarts. **No manual path setup required** — just download a model through the SmolChat UI.
+
 ### Known Gaps (Stage 2)
 
 - `AigentikSettings.modelPath` not set automatically from SmolChat's model selection — needs Settings UI or manual set

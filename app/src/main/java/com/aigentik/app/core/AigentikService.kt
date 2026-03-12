@@ -27,11 +27,13 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aigentik.app.R
 import com.aigentik.app.ai.AgentLLMFacade
+import com.aigentik.app.data.AppDB
 import com.aigentik.app.system.ConnectionWatchdog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import org.koin.core.context.GlobalContext
 
 /**
  * Foreground service that keeps the Aigentik process alive on Samsung and other
@@ -118,22 +120,46 @@ class AigentikService : Service() {
         )
 
         // Load LLM model (slow — launch on IO, app is already running in foreground)
-        val modelPath = AigentikSettings.modelPath
-        if (modelPath.isNotBlank()) {
-            serviceScope.launch {
-                try {
+        serviceScope.launch {
+            try {
+                val modelPath = resolveModelPath()
+                if (modelPath.isNotBlank()) {
                     val ok = AgentLLMFacade.loadModel(modelPath)
                     if (ok) {
-                        Log.i(TAG, "AgentLLMFacade ready")
+                        Log.i(TAG, "AgentLLMFacade ready — model: $modelPath")
                     } else {
                         Log.w(TAG, "AgentLLMFacade load returned false — no model at: $modelPath")
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "AgentLLMFacade load failed: ${e.message}")
+                } else {
+                    Log.w(TAG, "No model found — download a model in the app, then restart")
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "AgentLLMFacade load failed: ${e.message}")
             }
-        } else {
-            Log.w(TAG, "No model path configured — AI replies disabled until model is selected")
+        }
+    }
+
+    // Returns the model path for AgentLLMFacade.
+    // Priority: AigentikSettings.modelPath (user-overridden) → AppDB first downloaded model.
+    // Keeps AigentikSettings.modelPath in sync so future restarts skip the DB lookup.
+    private suspend fun resolveModelPath(): String {
+        // 1. Explicit override already set
+        val stored = AigentikSettings.modelPath
+        if (stored.isNotBlank()) return stored
+
+        // 2. Auto-detect from SmolChat's model library (AppDB)
+        return try {
+            val appDB = GlobalContext.get().get<AppDB>()
+            val models = appDB.getModelsList()
+            val path = models.firstOrNull()?.path ?: ""
+            if (path.isNotBlank()) {
+                AigentikSettings.modelPath = path  // cache for future restarts
+                Log.i(TAG, "Auto-resolved model path from AppDB: $path")
+            }
+            path
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not auto-resolve model path from AppDB: ${e.message}")
+            ""
         }
     }
 
