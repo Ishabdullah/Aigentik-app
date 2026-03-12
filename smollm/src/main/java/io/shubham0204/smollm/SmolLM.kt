@@ -44,57 +44,64 @@ class SmolLM {
                         cpuFeatures.contains("aes")
             val isAtLeastArmV84 = cpuFeatures.contains("dcpop") && cpuFeatures.contains("uscat")
 
-            Log.d(logTag, "CPU features: $cpuFeatures")
-            Log.d(logTag, "- hasFp16: $hasFp16")
-            Log.d(logTag, "- hasDotProd: $hasDotProd")
-            Log.d(logTag, "- hasSve: $hasSve")
-            Log.d(logTag, "- hasI8mm: $hasI8mm")
-            Log.d(logTag, "- isAtLeastArmV82: $isAtLeastArmV82")
-            Log.d(logTag, "- isAtLeastArmV84: $isAtLeastArmV84")
+            if (BuildConfig.DEBUG) {
+                Log.d(logTag, "CPU features: $cpuFeatures")
+                Log.d(logTag, "- hasFp16: $hasFp16")
+                Log.d(logTag, "- hasDotProd: $hasDotProd")
+                Log.d(logTag, "- hasSve: $hasSve")
+                Log.d(logTag, "- hasI8mm: $hasI8mm")
+                Log.d(logTag, "- isAtLeastArmV82: $isAtLeastArmV82")
+                Log.d(logTag, "- isAtLeastArmV84: $isAtLeastArmV84")
+            }
 
             // Check if the app is running in an emulated device
             // Note, this is not the OFFICIAL way to check if the app is running
             // on an emulator
             val isEmulated =
                 (Build.HARDWARE.contains("goldfish") || Build.HARDWARE.contains("ranchu"))
-            Log.d(logTag, "isEmulated: $isEmulated")
+            if (BuildConfig.DEBUG) Log.d(logTag, "isEmulated: $isEmulated")
 
-            if (!isEmulated) {
-                if (supportsArm64V8a()) {
-                    if (isAtLeastArmV84 && hasSve && hasI8mm && hasFp16 && hasDotProd) {
-                        Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod_i8mm_sve.so")
-                        System.loadLibrary("smollm_v8_4_fp16_dotprod_i8mm_sve")
-                    } else if (isAtLeastArmV84 && hasSve && hasFp16 && hasDotProd) {
-                        Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod_sve.so")
-                        System.loadLibrary("smollm_v8_4_fp16_dotprod_sve")
-                    } else if (isAtLeastArmV84 && hasI8mm && hasFp16 && hasDotProd) {
-                        Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod_i8mm.so")
-                        System.loadLibrary("smollm_v8_4_fp16_dotprod_i8mm")
-                    } else if (isAtLeastArmV84 && hasFp16 && hasDotProd) {
-                        Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod.so")
-                        System.loadLibrary("smollm_v8_4_fp16_dotprod")
-                    } else if (isAtLeastArmV82 && hasFp16 && hasDotProd) {
-                        Log.d(logTag, "Loading libsmollm_v8_2_fp16_dotprod.so")
-                        System.loadLibrary("smollm_v8_2_fp16_dotprod")
-                    } else if (isAtLeastArmV82 && hasFp16) {
-                        Log.d(logTag, "Loading libsmollm_v8_2_fp16.so")
-                        System.loadLibrary("smollm_v8_2_fp16")
+            try {
+                if (!isEmulated) {
+                    if (supportsArm64V8a()) {
+                        if (isAtLeastArmV84 && hasSve && hasI8mm && hasFp16 && hasDotProd) {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod_i8mm_sve.so")
+                            System.loadLibrary("smollm_v8_4_fp16_dotprod_i8mm_sve")
+                        } else if (isAtLeastArmV84 && hasSve && hasFp16 && hasDotProd) {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod_sve.so")
+                            System.loadLibrary("smollm_v8_4_fp16_dotprod_sve")
+                        } else if (isAtLeastArmV84 && hasI8mm && hasFp16 && hasDotProd) {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod_i8mm.so")
+                            System.loadLibrary("smollm_v8_4_fp16_dotprod_i8mm")
+                        } else if (isAtLeastArmV84 && hasFp16 && hasDotProd) {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8_4_fp16_dotprod.so")
+                            System.loadLibrary("smollm_v8_4_fp16_dotprod")
+                        } else if (isAtLeastArmV82 && hasFp16 && hasDotProd) {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8_2_fp16_dotprod.so")
+                            System.loadLibrary("smollm_v8_2_fp16_dotprod")
+                        } else if (isAtLeastArmV82 && hasFp16) {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8_2_fp16.so")
+                            System.loadLibrary("smollm_v8_2_fp16")
+                        } else {
+                            if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v8.so")
+                            System.loadLibrary("smollm_v8")
+                        }
+                    } else if (Build.SUPPORTED_32_BIT_ABIS[0]?.equals("armeabi-v7a") == true) {
+                        // armv7a (32bit) device
+                        if (BuildConfig.DEBUG) Log.d(logTag, "Loading libsmollm_v7a.so")
+                        System.loadLibrary("smollm_v7a")
                     } else {
-                        Log.d(logTag, "Loading libsmollm_v8.so")
-                        System.loadLibrary("smollm_v8")
+                        if (BuildConfig.DEBUG) Log.d(logTag, "Loading default libsmollm.so")
+                        System.loadLibrary("smollm")
                     }
-                } else if (Build.SUPPORTED_32_BIT_ABIS[0]?.equals("armeabi-v7a") == true) {
-                    // armv7a (32bit) device
-                    Log.d(logTag, "Loading libsmollm_v7a.so")
-                    System.loadLibrary("smollm_v7a")
                 } else {
-                    Log.d(logTag, "Loading default libsmollm.so")
+                    // load the default native library with no ARM
+                    // specific instructions
+                    if (BuildConfig.DEBUG) Log.d(logTag, "Loading default libsmollm.so")
                     System.loadLibrary("smollm")
                 }
-            } else {
-                // load the default native library with no ARM
-                // specific instructions
-                Log.d(logTag, "Loading default libsmollm.so")
+            } catch (e: UnsatisfiedLinkError) {
+                Log.w(logTag, "Optimized native library failed to load, falling back to generic: ${e.message}")
                 System.loadLibrary("smollm")
             }
         }
@@ -178,11 +185,13 @@ class SmolLM {
      */
     suspend fun load(modelPath: String, params: InferenceParams = InferenceParams()) =
         withContext(Dispatchers.IO) {
-            val ggufReader = GGUFReader()
-            ggufReader.load(modelPath)
-            val modelContextSize = ggufReader.getContextSize() ?: DefaultInferenceParams.contextSize
-            val modelChatTemplate =
-                ggufReader.getChatTemplate() ?: DefaultInferenceParams.chatTemplate
+            val modelContextSize: Long
+            val modelChatTemplate: String
+            GGUFReader().use { ggufReader ->
+                ggufReader.load(modelPath)
+                modelContextSize = ggufReader.getContextSize() ?: DefaultInferenceParams.contextSize
+                modelChatTemplate = ggufReader.getChatTemplate() ?: DefaultInferenceParams.chatTemplate
+            }
             nativePtr =
                 loadModel(
                     modelPath,

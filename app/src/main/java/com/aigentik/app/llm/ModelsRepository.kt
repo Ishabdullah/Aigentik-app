@@ -20,16 +20,23 @@ import android.content.Context
 import com.aigentik.app.data.AppDB
 import com.aigentik.app.data.LLMModel
 import com.aigentik.app.ui.screens.manage_asr.ASRModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import org.koin.core.annotation.Single
 import java.io.File
 
 @Single
 class ModelsRepository(private val context: Context, private val appDB: AppDB) {
     init {
-        for (model in appDB.getModelsList()) {
-            if (!File(model.path).exists()) {
-                deleteModel(model.id)
+        // Purge stale model entries in the background — this is a one-time cleanup
+        // on startup and must not block the main thread.
+        CoroutineScope(Dispatchers.IO).launch {
+            for (model in appDB.getModelsList()) {
+                if (!File(model.path).exists()) {
+                    deleteModel(model.id)
+                }
             }
         }
     }
@@ -45,17 +52,16 @@ class ModelsRepository(private val context: Context, private val appDB: AppDB) {
         }
     }
 
-    fun getModelFromId(id: Long): LLMModel = appDB.getModel(id)
+    suspend fun getModelFromId(id: Long): LLMModel = appDB.getModel(id)
 
     fun getAvailableModels(): Flow<List<LLMModel>> = appDB.getModels()
 
-    fun getAvailableModelsList(): List<LLMModel> = appDB.getModelsList()
+    suspend fun getAvailableModelsList(): List<LLMModel> = appDB.getModelsList()
 
-    fun deleteModel(id: Long) {
-        appDB.getModel(id).also {
-            File(it.path).delete()
-            appDB.deleteModel(it.id)
-        }
+    suspend fun deleteModel(id: Long) {
+        val model = appDB.getModel(id)
+        File(model.path).delete()
+        appDB.deleteModel(model.id)
     }
 
     fun isSpeech2TextModelDownloaded(asrModel: ASRModel): Boolean {

@@ -21,21 +21,22 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
 import android.util.Log
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import com.aigentik.app.BuildConfig
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
 /**
- * BroadcastReceiver for incoming SMS messages
- * Receives SMS_RECEIVED broadcasts and processes incoming messages
+ * BroadcastReceiver for incoming SMS messages.
+ * Receives SMS_RECEIVED broadcasts and forwards messages to the
+ * Koin-scoped SMSRepository instead of a static companion-object flow.
  */
-class SMSReceiver : BroadcastReceiver() {
+class SMSReceiver : BroadcastReceiver(), KoinComponent {
 
     companion object {
         private const val TAG = "AigentikSMSReceiver"
-
-        private val _incomingSMS = MutableStateFlow<List<SMSMessage>>(emptyList())
-        val incomingSMS = _incomingSMS.asStateFlow()
     }
+
+    private val smsRepository: SMSRepository by inject()
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
@@ -60,10 +61,10 @@ class SMSReceiver : BroadcastReceiver() {
                 messages.add(message)
             }
 
-            // Update flow with new messages
-            _incomingSMS.value = _incomingSMS.value + messages
+            // Update the scoped repository with new messages
+            smsRepository.addMessages(messages)
 
-            Log.d(TAG, "Received ${messages.size} SMS messages")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Received ${messages.size} SMS messages")
 
             // Trigger AI reply suggestion for incoming messages
             messages.forEach { message ->
@@ -78,6 +79,6 @@ class SMSReceiver : BroadcastReceiver() {
     private fun triggerAIReplySuggestion(context: Context, message: SMSMessage) {
         // This will be connected to the LLM for AI-powered reply suggestions
         // The ViewModel will handle generating suggestions using the loaded model
-        Log.d(TAG, "Triggering AI reply suggestion for SMS from: ${message.address}")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Triggering AI reply suggestion for SMS from: ${message.address}")
     }
 }

@@ -19,7 +19,7 @@ package io.shubham0204.smollm
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class GGUFReader {
+class GGUFReader : AutoCloseable {
     companion object {
         init {
             System.loadLibrary("ggufreader")
@@ -47,6 +47,13 @@ class GGUFReader {
         return chatTemplate.ifEmpty { null }
     }
 
+    override fun close() {
+        if (nativeHandle != 0L) {
+            freeGGUFContext(nativeHandle)
+            nativeHandle = 0L
+        }
+    }
+
     /** Returns the native handle (pointer to gguf_context created on the native side) */
     private external fun getGGUFContextNativeHandle(modelPath: String): Long
 
@@ -55,4 +62,7 @@ class GGUFReader {
 
     /** Read the chat template from the GGUF file, given the native handle */
     private external fun getChatTemplate(nativeHandle: Long): String
+
+    /** Free the gguf_context on the native side */
+    private external fun freeGGUFContext(nativeHandle: Long)
 }

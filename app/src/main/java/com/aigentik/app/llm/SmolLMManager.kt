@@ -17,6 +17,7 @@
 package com.aigentik.app.llm
 
 import android.util.Log
+import com.aigentik.app.BuildConfig
 import io.shubham0204.smollm.SmolLM
 import com.aigentik.app.data.AppDB
 import com.aigentik.app.data.Chat
@@ -32,8 +33,11 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.time.measureTime
 
+// Single-threaded dispatcher for all JNI calls — llama.cpp context is not thread-safe
+private val jniDispatcher = Dispatchers.Default.limitedParallelism(1)
+
 private const val LOGTAG = "[SmolLMManager-Kt]"
-private val LOGD: (String) -> Unit = { Log.d(LOGTAG, it) }
+private val LOGD: (String) -> Unit = { if (BuildConfig.DEBUG) Log.d(LOGTAG, it) }
 
 @Single
 class SmolLMManager(private val appDB: AppDB) {
@@ -78,7 +82,7 @@ class SmolLMManager(private val appDB: AppDB) {
 
             try {
                 this.chat = chat
-                modelInitJob = CoroutineScope(Dispatchers.Default).launch {
+                modelInitJob = CoroutineScope(jniDispatcher).launch {
                     try {
                         instance.load(modelPath, params)
                         LOGD("Model loaded")
@@ -156,7 +160,7 @@ class SmolLMManager(private val appDB: AppDB) {
             // Cancel any existing response generation
             responseGenerationJob?.cancel()
 
-            responseGenerationJob = CoroutineScope(Dispatchers.Default).launch {
+            responseGenerationJob = CoroutineScope(jniDispatcher).launch {
                 try {
                     isInferenceOn = true
                     var response = ""
@@ -164,9 +168,11 @@ class SmolLMManager(private val appDB: AppDB) {
                     val duration = measureTime {
                         instance.getResponseAsFlow(query).collect { piece ->
                             response += piece
-                            withContext(Dispatchers.Main) {
-                                onPartialResponseGenerated(response)
-                            }
+                            // Callback intentionally NOT switched to Main here —
+                            // caller is responsible for dispatching UI updates,
+                            // allowing expensive work (e.g. Markdown render) to
+                            // stay on a background thread before posting to Main.
+                            onPartialResponseGenerated(response)
                         }
                     }
 
@@ -212,7 +218,7 @@ class SmolLMManager(private val appDB: AppDB) {
     private val BENCH_REPETITION = 3
 
     fun benchmark(onResult: (String) -> Unit) {
-        CoroutineScope(Dispatchers.Default).launch {
+        CoroutineScope(jniDispatcher).launch {
             val result = instance.benchModel(
                 BENCH_PROMPT_PROCESSING_TOKENS,
                 BENCH_TOKEN_GENERATION_TOKENS,

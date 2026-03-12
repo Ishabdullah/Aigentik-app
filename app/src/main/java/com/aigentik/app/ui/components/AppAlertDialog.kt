@@ -28,8 +28,9 @@ private var title = ""
 private var text = ""
 private var positiveButtonText = ""
 private var negativeButtonText = ""
-private lateinit var positiveButtonOnClick: (() -> Unit)
-private lateinit var negativeButtonOnClick: (() -> Unit)
+// Nullable to allow clearing after use, preventing lambda memory leaks
+private var positiveButtonOnClick: (() -> Unit)? = null
+private var negativeButtonOnClick: (() -> Unit)? = null
 private val alertDialogShowStatus = mutableStateOf(false)
 
 @Composable
@@ -44,7 +45,11 @@ fun AppAlertDialog() {
                 TextButton(
                     onClick = {
                         alertDialogShowStatus.value = false
-                        positiveButtonOnClick()
+                        val onClick = positiveButtonOnClick
+                        // Null out before invoking to release captured references
+                        positiveButtonOnClick = null
+                        negativeButtonOnClick = null
+                        onClick?.invoke()
                     }
                 ) {
                     Text(text = positiveButtonText)
@@ -54,7 +59,11 @@ fun AppAlertDialog() {
                 TextButton(
                     onClick = {
                         alertDialogShowStatus.value = false
-                        negativeButtonOnClick()
+                        val onClick = negativeButtonOnClick
+                        // Null out before invoking to release captured references
+                        positiveButtonOnClick = null
+                        negativeButtonOnClick = null
+                        onClick?.invoke()
                     }
                 ) {
                     Text(text = negativeButtonText)
@@ -75,8 +84,8 @@ fun createAlertDialog(
     title = dialogTitle
     text = dialogText
     positiveButtonOnClick = onPositiveButtonClick
-    onNegativeButtonClick?.let { negativeButtonOnClick = it }
+    negativeButtonOnClick = onNegativeButtonClick
     positiveButtonText = dialogPositiveButtonText
-    dialogNegativeButtonText?.let { negativeButtonText = it }
+    negativeButtonText = dialogNegativeButtonText ?: ""
     alertDialogShowStatus.value = true
 }

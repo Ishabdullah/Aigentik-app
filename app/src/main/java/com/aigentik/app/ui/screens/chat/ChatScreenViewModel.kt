@@ -45,6 +45,7 @@ import com.aigentik.app.ui.screens.manage_asr.SETTING_KEY_SPEECH2TEXT_ENABLED
 import com.aigentik.app.ui.screens.manage_asr.availableASRModels
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -52,6 +53,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.koin.android.annotation.KoinViewModel
 import java.util.Date
 import kotlin.math.pow
@@ -170,7 +172,7 @@ class ChatScreenViewModel(
         FAILURE, // model loading failed
     }
 
-    private val _uiState = MutableStateFlow(initializeUIState())
+    private val _uiState = MutableStateFlow(ChatScreenUIState())
     val uiState: StateFlow<ChatScreenUIState> = _uiState
 
     // Used to pre-set a value in the query text-field of the chat screen
@@ -183,9 +185,25 @@ class ChatScreenViewModel(
     private var activityManager: ActivityManager
 
     init {
-        setupCollectors()
-        loadModel()
         activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        // Load the default chat asynchronously to avoid blocking the main thread
+        viewModelScope.launch {
+            val isSpeech2TextEnabled = sharedPrefStore.get(
+                SETTING_KEY_SPEECH2TEXT_ENABLED,
+                SETTING_DEF_VALUE_SPEECH2_TEXT_ENABLED
+            )
+            val defaultChat = withContext(Dispatchers.IO) { appDB.loadDefaultChat() }
+            _uiState.update {
+                it.copy(
+                    chat = defaultChat,
+                    audioTranscriptionUIState = AudioTranscriptionUIState(
+                        isAvailable = isSpeech2TextEnabled
+                    )
+                )
+            }
+            setupCollectors()
+            loadModel()
+        }
     }
 
     /**
@@ -195,58 +213,60 @@ class ChatScreenViewModel(
      */
     fun loadModel(onComplete: (ModelLoadingState) -> Unit = {}) {
         val chat = _uiState.value.chat
-        val model = modelsRepository.getModelFromId(chat.llmModelId)
-        if (chat.llmModelId == -1L) {
-            _uiState.update { it.copy(showSelectModelListDialog = true) }
-        } else {
-            _uiState.update { it.copy(modelLoadingState = ModelLoadingState.IN_PROGRESS) }
-            smolLMManager.load(
-                chat,
-                model.path,
-                SmolLM.InferenceParams(
-                    chat.minP,
-                    chat.temperature,
-                    !chat.isTask,
-                    chat.contextSize.toLong(),
-                    chat.chatTemplate.takeIf { it.isNotBlank() && ("{%" in it || "{{" in it) },
-                    chat.nThreads,
-                    chat.useMmap,
-                    chat.useMlock,
-                ),
-                onError = { e ->
-                    _uiState.update { it.copy(modelLoadingState = ModelLoadingState.FAILURE) }
-                    onComplete(ModelLoadingState.FAILURE)
-                    createAlertDialog(
-                        dialogTitle = context.getString(R.string.dialog_err_title),
-                        dialogText = context.getString(R.string.dialog_err_text, e.message),
-                        dialogPositiveButtonText =
-                            context.getString(R.string.dialog_err_change_model),
-                        onPositiveButtonClick = {
-                            onEvent(
-                                ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog(
-                                    visible = true
+        viewModelScope.launch {
+            val model = modelsRepository.getModelFromId(chat.llmModelId)
+            if (chat.llmModelId == -1L) {
+                _uiState.update { it.copy(showSelectModelListDialog = true) }
+            } else {
+                _uiState.update { it.copy(modelLoadingState = ModelLoadingState.IN_PROGRESS) }
+                smolLMManager.load(
+                    chat,
+                    model.path,
+                    SmolLM.InferenceParams(
+                        chat.minP,
+                        chat.temperature,
+                        !chat.isTask,
+                        chat.contextSize.toLong(),
+                        chat.chatTemplate.takeIf { it.isNotBlank() && ("{%" in it || "{{" in it) },
+                        chat.nThreads,
+                        chat.useMmap,
+                        chat.useMlock,
+                    ),
+                    onError = { e ->
+                        _uiState.update { it.copy(modelLoadingState = ModelLoadingState.FAILURE) }
+                        onComplete(ModelLoadingState.FAILURE)
+                        createAlertDialog(
+                            dialogTitle = context.getString(R.string.dialog_err_title),
+                            dialogText = context.getString(R.string.dialog_err_text, e.message),
+                            dialogPositiveButtonText =
+                                context.getString(R.string.dialog_err_change_model),
+                            onPositiveButtonClick = {
+                                onEvent(
+                                    ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog(
+                                        visible = true
+                                    )
                                 )
-                            )
-                        },
-                        dialogNegativeButtonText = context.getString(R.string.dialog_err_close),
-                        onNegativeButtonClick = {},
-                    )
-                },
-                onSuccess = {
-                    _uiState.update {
-                        it.copy(
-                            modelLoadingState = ModelLoadingState.SUCCESS,
-                            memoryUsage =
-                                if (it.memoryUsage != null) {
-                                    getCurrentMemoryUsage()
-                                } else {
-                                    null
-                                },
+                            },
+                            dialogNegativeButtonText = context.getString(R.string.dialog_err_close),
+                            onNegativeButtonClick = {},
                         )
-                    }
-                    onComplete(ModelLoadingState.SUCCESS)
-                },
-            )
+                    },
+                    onSuccess = {
+                        _uiState.update {
+                            it.copy(
+                                modelLoadingState = ModelLoadingState.SUCCESS,
+                                memoryUsage =
+                                    if (it.memoryUsage != null) {
+                                        getCurrentMemoryUsage()
+                                    } else {
+                                        null
+                                    },
+                            )
+                        }
+                        onComplete(ModelLoadingState.SUCCESS)
+                    },
+                )
+            }
         }
     }
 
@@ -309,39 +329,44 @@ class ChatScreenViewModel(
             }
 
             is ChatScreenUIEvent.FolderEvents.UpdateChatFolder -> {
-                appDB.updateChat(_uiState.value.chat.copy(folderId = event.newFolderId))
+                viewModelScope.launch { appDB.updateChat(_uiState.value.chat.copy(folderId = event.newFolderId)) }
             }
 
             is ChatScreenUIEvent.FolderEvents.AddFolder -> {
-                appDB.addFolder(event.folderName)
+                viewModelScope.launch { appDB.addFolder(event.folderName) }
             }
 
             is ChatScreenUIEvent.FolderEvents.UpdateFolder -> {
-                appDB.updateFolder(event.folder)
+                viewModelScope.launch { appDB.updateFolder(event.folder) }
             }
 
             is ChatScreenUIEvent.FolderEvents.DeleteFolder -> {
-                appDB.deleteFolder(event.folderId)
+                viewModelScope.launch { appDB.deleteFolder(event.folderId) }
             }
 
             is ChatScreenUIEvent.FolderEvents.DeleteFolderWithChats -> {
-                appDB.deleteFolderWithChats(event.folderId)
+                viewModelScope.launch { appDB.deleteFolderWithChats(event.folderId) }
             }
 
             is ChatScreenUIEvent.ChatEvents.UpdateChatModel -> {
-                updateChatLLMParams(event.model.id, event.model.chatTemplate)
-                loadModel()
-                onEvent(ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog(visible = false))
+                viewModelScope.launch {
+                    updateChatLLMParams(event.model.id, event.model.chatTemplate)
+                    loadModel()
+                    onEvent(ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog(visible = false))
+                }
             }
 
             is ChatScreenUIEvent.ChatEvents.DeleteModel -> {
-                deleteModel(event.model.id)
-                Toast.makeText(
-                    context,
-                    context.getString(R.string.chat_model_deleted, event.model.name),
-                    Toast.LENGTH_LONG,
-                )
-                    .show()
+                viewModelScope.launch {
+                    modelsRepository.deleteModel(event.model.id)
+                    val newChat = _uiState.value.chat.copy(llmModelId = -1)
+                    _uiState.update { it.copy(chat = newChat) }
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.chat_model_deleted, event.model.name),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             }
 
             ChatScreenUIEvent.ChatEvents.LoadChatModel -> {}
@@ -355,17 +380,15 @@ class ChatScreenViewModel(
             }
 
             is ChatScreenUIEvent.ChatEvents.OnTaskSelected -> {
-                // Using parameters from the `task`
-                // create a `Chat` instance and switch to it
-                modelsRepository.getModelFromId(event.task.modelId).let { model ->
-                    val newTask =
-                        appDB.addChat(
-                            chatName = event.task.name,
-                            chatTemplate = model.chatTemplate,
-                            systemPrompt = event.task.systemPrompt,
-                            llmModelId = event.task.modelId,
-                            isTask = true,
-                        )
+                viewModelScope.launch {
+                    val model = modelsRepository.getModelFromId(event.task.modelId)
+                    val newTask = appDB.addChat(
+                        chatName = event.task.name,
+                        chatTemplate = model.chatTemplate,
+                        systemPrompt = event.task.systemPrompt,
+                        llmModelId = event.task.modelId,
+                        isTask = true,
+                    )
                     switchChat(newTask)
                     onEvent(
                         ChatScreenUIEvent.DialogEvents.ToggleTaskListBottomList(visible = false)
@@ -383,19 +406,21 @@ class ChatScreenViewModel(
                 // messages
                 //       so unload (remove all messages) and load (add all messages) the
                 // model.
-                deleteMessage(event.oldMessage.id)
-                if (!event.lastMessage.isUserMessage) {
-                    deleteMessage(event.lastMessage.id)
-                }
-                appDB.addUserMessage(event.chatId, event.newMessageText)
-                unloadModel()
-                loadModel(
-                    onComplete = {
-                        if (it == ModelLoadingState.SUCCESS) {
-                            sendUserQuery(event.newMessageText, addMessageToDB = false)
-                        }
+                viewModelScope.launch {
+                    appDB.deleteMessage(event.oldMessage.id)
+                    if (!event.lastMessage.isUserMessage) {
+                        appDB.deleteMessage(event.lastMessage.id)
                     }
-                )
+                    appDB.addUserMessage(event.chatId, event.newMessageText)
+                    unloadModel()
+                    loadModel(
+                        onComplete = {
+                            if (it == ModelLoadingState.SUCCESS) {
+                                sendUserQuery(event.newMessageText, addMessageToDB = false)
+                            }
+                        }
+                    )
+                }
             }
 
             is ChatScreenUIEvent.ChatEvents.OnDeleteChat -> {
@@ -406,13 +431,12 @@ class ChatScreenViewModel(
                     dialogPositiveButtonText = context.getString(R.string.dialog_pos_delete),
                     dialogNegativeButtonText = context.getString(R.string.dialog_neg_cancel),
                     onPositiveButtonClick = {
-                        deleteChat(event.chat)
+                        viewModelScope.launch { deleteChat(event.chat) }
                         Toast.makeText(
                             context,
                             "Chat '${event.chat.name}' deleted",
                             Toast.LENGTH_LONG,
-                        )
-                            .show()
+                        ).show()
                     },
                     onNegativeButtonClick = {},
                 )
@@ -425,29 +449,32 @@ class ChatScreenViewModel(
                     dialogPositiveButtonText = context.getString(R.string.dialog_pos_clear),
                     dialogNegativeButtonText = context.getString(R.string.dialog_neg_cancel),
                     onPositiveButtonClick = {
-                        deleteChatMessages(event.chat)
-                        unloadModel()
-                        loadModel(
-                            onComplete = {
-                                if (it == ModelLoadingState.SUCCESS) {
-                                    Toast.makeText(
-                                        context,
-                                        "Chat '${event.chat.name}' cleared",
-                                        Toast.LENGTH_LONG,
-                                    )
-                                        .show()
+                        viewModelScope.launch {
+                            deleteChatMessages(event.chat)
+                            unloadModel()
+                            loadModel(
+                                onComplete = {
+                                    if (it == ModelLoadingState.SUCCESS) {
+                                        Toast.makeText(
+                                            context,
+                                            "Chat '${event.chat.name}' cleared",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     },
                     onNegativeButtonClick = {},
                 )
             }
 
             ChatScreenUIEvent.ChatEvents.NewChat -> {
-                val chatCount = appDB.getChatsCount()
-                val newChat = appDB.addChat(chatName = "Untitled ${chatCount + 1}")
-                switchChat(newChat)
+                viewModelScope.launch {
+                    val chatCount = appDB.getChatsCount()
+                    val newChat = appDB.addChat(chatName = "Untitled ${chatCount + 1}")
+                    switchChat(newChat)
+                }
             }
 
             is ChatScreenUIEvent.ChatEvents.SwitchChat -> {
@@ -455,11 +482,13 @@ class ChatScreenViewModel(
             }
 
             is ChatScreenUIEvent.ChatEvents.UpdateChatSettings -> {
-                val newChat = event.settings.toChat(event.existingChat)
-                _uiState.update { it.copy(chat = newChat) }
-                appDB.updateChat(newChat)
-                unloadModel()
-                loadModel()
+                viewModelScope.launch {
+                    val newChat = event.settings.toChat(event.existingChat)
+                    _uiState.update { it.copy(chat = newChat) }
+                    appDB.updateChat(newChat)
+                    unloadModel()
+                    loadModel()
+                }
             }
 
             is ChatScreenUIEvent.ChatEvents.StartBenchmark -> {
@@ -511,23 +540,6 @@ class ChatScreenViewModel(
                 audioTranscriptionService.stopTranscription()
             }
         }
-    }
-
-    private fun initializeUIState(): ChatScreenUIState {
-        val defaultChat = appDB.loadDefaultChat()
-
-        val isSpeech2TextEnabled = sharedPrefStore.get(
-            SETTING_KEY_SPEECH2TEXT_ENABLED,
-            SETTING_DEF_VALUE_SPEECH2_TEXT_ENABLED
-        )
-        val audioTranscriptionUIState = AudioTranscriptionUIState(
-            isAvailable = isSpeech2TextEnabled
-        )
-
-        return ChatScreenUIState(
-            chat = defaultChat,
-            audioTranscriptionUIState = audioTranscriptionUIState
-        )
     }
 
     private fun setupCollectors() {
@@ -633,32 +645,31 @@ class ChatScreenViewModel(
         }
     }
 
-    private fun updateChatLLMParams(modelId: Long, chatTemplate: String) {
+    private suspend fun updateChatLLMParams(modelId: Long, chatTemplate: String) {
         val newChat = _uiState.value.chat.copy(llmModelId = modelId, chatTemplate = chatTemplate)
         _uiState.update { it.copy(chat = newChat) }
         appDB.updateChat(newChat)
     }
 
-    private fun deleteMessage(messageId: Long) {
-        appDB.deleteMessage(messageId)
-    }
-
     private fun sendUserQuery(query: String, addMessageToDB: Boolean = true) {
         val chat = uiState.value.chat
-        // Update the 'dateUsed' attribute of the current Chat instance
-        // when a query is sent by the user
-        chat.dateUsed = Date()
-        appDB.updateChat(chat)
+        viewModelScope.launch {
+            // Update the 'dateUsed' attribute of the current Chat instance
+            // when a query is sent by the user
+            chat.dateUsed = Date()
+            appDB.updateChat(chat)
 
-        if (chat.isTask) {
-            // If the chat is a 'task', delete all existing messages
-            // to maintain the 'stateless' nature of the task
-            appDB.deleteMessages(chat.id)
+            if (chat.isTask) {
+                // If the chat is a 'task', delete all existing messages
+                // to maintain the 'stateless' nature of the task
+                appDB.deleteMessages(chat.id)
+            }
+
+            if (addMessageToDB) {
+                appDB.addUserMessage(chat.id, query)
+            }
         }
 
-        if (addMessageToDB) {
-            appDB.addUserMessage(chat.id, query)
-        }
         _uiState.update { it.copy(isGeneratingResponse = true, renderedPartialResponse = null) }
         smolLMManager.getResponse(
             query,
@@ -670,7 +681,10 @@ class ChatScreenViewModel(
                 }
             },
             onPartialResponseGenerated = { resp ->
-                _uiState.update { it.copy(renderedPartialResponse = mdRenderer.render(resp)) }
+                // Callback arrives on jniDispatcher (background). Render Markdown here,
+                // then post the Spanned result to StateFlow — no Main-thread work needed.
+                val rendered = mdRenderer.render(resp)
+                _uiState.update { it.copy(renderedPartialResponse = rendered) }
             },
             onSuccess = { response ->
                 val updatedChat = chat.copy(contextSizeConsumed = response.contextLengthUsed)
@@ -688,7 +702,7 @@ class ChatScreenViewModel(
                             },
                     )
                 }
-                appDB.updateChat(updatedChat)
+                viewModelScope.launch { appDB.updateChat(updatedChat) }
             },
             onCancelled = {
                 // ignore CancellationException, as it was called because
@@ -720,22 +734,17 @@ class ChatScreenViewModel(
         loadModel()
     }
 
-    private fun deleteChat(chat: Chat) {
+    private suspend fun deleteChat(chat: Chat) {
         stopGeneration()
         appDB.deleteChat(chat)
         appDB.deleteMessages(chat.id)
-        switchChat(appDB.loadDefaultChat())
+        val defaultChat = appDB.loadDefaultChat()
+        switchChat(defaultChat)
     }
 
-    private fun deleteChatMessages(chat: Chat) {
+    private suspend fun deleteChatMessages(chat: Chat) {
         stopGeneration()
         appDB.deleteMessages(chat.id)
-    }
-
-    private fun deleteModel(modelId: Long) {
-        modelsRepository.deleteModel(modelId)
-        val newChat = _uiState.value.chat.copy(llmModelId = -1)
-        _uiState.update { it.copy(chat = newChat) }
     }
 
     /**

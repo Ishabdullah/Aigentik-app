@@ -22,6 +22,7 @@ class SharedPrefStore(context: Context) {
         sharedPreferences.registerOnSharedPreferenceChangeListener(changeListener)
     }
 
+    @Suppress("UNCHECKED_CAST")
     fun <T> get(key: String, defaultValue: T): T {
         return when (defaultValue) {
             is Boolean -> sharedPreferences.getBoolean(key, defaultValue) as T

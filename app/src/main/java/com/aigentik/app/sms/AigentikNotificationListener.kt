@@ -23,6 +23,7 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import com.aigentik.app.BuildConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -88,7 +89,7 @@ class AigentikNotificationListener : NotificationListenerService() {
             val text = extractTextFromExtras(extras, NOTIFICATION_TEXT_KEYS)
             val ticker = notification.tickerText?.toString()
 
-            Log.d(TAG, "Notification from $packageName: title=$title, text=$text")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Notification from $packageName: title=$title, text=$text")
 
             // Check for quick reply actions (RCS support)
             val replyActions = extractReplyActions(notification)
@@ -163,7 +164,7 @@ class AigentikNotificationListener : NotificationListenerService() {
     private fun triggerAIReplySuggestion(message: IncomingNotification) {
         // This will be connected to the LLM for AI-powered reply suggestions
         // The ViewModel will handle generating suggestions using the loaded model
-        Log.d(TAG, "Triggering AI reply suggestion for: ${message.message}")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Triggering AI reply suggestion for notification")
     }
 
     /**
@@ -182,7 +183,7 @@ class AigentikNotificationListener : NotificationListenerService() {
                 RemoteInput.addResultsToIntent(arrayOf(remoteInput), replyIntent, resultBundle)
 
                 pendingIntent.send(this, 0, replyIntent)
-                Log.d(TAG, "Quick reply sent: $replyText")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Quick reply sent")
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending quick reply", e)
             }

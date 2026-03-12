@@ -144,7 +144,7 @@ class SMSService(private val context: Context) {
      */
     suspend fun sendSMS(phoneNumber: String, message: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val smsManager = SmsManager.getDefault()
+            val smsManager = context.getSystemService(SmsManager::class.java)
 
             // Split long messages
             val parts = smsManager.divideMessage(message)
