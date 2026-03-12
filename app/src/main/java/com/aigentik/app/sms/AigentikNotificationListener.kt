@@ -6,12 +6,15 @@ import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.aigentik.app.core.ChannelManager
 import com.aigentik.app.core.ContactEngine
+import com.aigentik.app.core.Message
 import com.aigentik.app.core.MessageDeduplicator
 import com.aigentik.app.core.MessageEngine
 import com.aigentik.app.core.PhoneNormalizer
+import com.aigentik.app.email.EmailMonitor
 import java.util.concurrent.ConcurrentHashMap
 
-// NotificationAdapter v2.0 — Stage 1 complete
+// NotificationAdapter v3.0 — Stage 2 complete
+// v3.0: Gmail notifications routed to EmailMonitor.onGmailNotification() (Stage 2)
 // v2.0: Routes to MessageEngine (Stage 1) — replaces AgentMessageEngine stub
 //       ContactEngine name lookup in resolveSender() and for senderName
 // v1.5: ConcurrentHashMap for activeNotifications (thread safety on notification bursts)
@@ -56,8 +59,8 @@ class AigentikNotificationListener : NotificationListenerService() {
         if (sbn.packageName == GMAIL_PACKAGE) {
             val isGroupSummary = sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
             if (isGroupSummary) return
-            Log.i(TAG, "Gmail notification detected — EmailMonitor wired in Stage 2")
-            // TODO Stage 2: EmailMonitor.onGmailNotification(applicationContext)
+            Log.i(TAG, "Gmail notification detected — routing to EmailMonitor")
+            EmailMonitor.onGmailNotification(applicationContext)
             return
         }
 
@@ -108,11 +111,11 @@ class AigentikNotificationListener : NotificationListenerService() {
         // Resolve sender name from ContactEngine for better context in AI replies
         val senderName = ContactEngine.findContact(sender)?.name
 
-        // Route to MessageEngine (Stage 1)
+        // Route to MessageEngine (Stage 2)
         MessageEngine.onMessageReceived(
-            MessageEngine.Message(
+            Message(
                 id          = dedupKey,
-                channel     = MessageEngine.Channel.NOTIFICATION,
+                channel     = Message.Channel.NOTIFICATION,
                 sender      = sender,
                 senderName  = senderName,
                 body        = text,

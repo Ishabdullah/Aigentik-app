@@ -109,3 +109,60 @@ Read files from aigentik-android:
 - `SmolLM.storeChats=false` behavior relies on messages list clearing after each completion — if behavior differs, context may accumulate; needs validation
 
 ---
+
+## 2026-03-12 — Session 4: Stage 2 Complete — Gmail OAuth + Email Pipeline
+
+### Implemented
+
+- `core/Message.kt` — top-level `Message` data class + nested `Channel` enum. Promoted from `MessageEngine.Message` (inner class) so `EmailMonitor` can reference `com.aigentik.app.core.Message` directly. Fields: id, channel, sender, senderName, body, subject, packageName, timestamp, threadId.
+- `auth/GoogleAuthManager.kt` — copied verbatim from aigentik-android v1.8. Critical: handles `UserRecoverableAuthException` for restricted Gmail scopes — stores resolution `Intent` in `pendingScopeIntent`, calls `scopeResolutionListener` for Settings UI to launch consent dialog.
+- `email/GmailApiClient.kt` — copied verbatim v1.6. Full Gmail REST client via OkHttp: listUnread, getFullEmail, sendEmail, replyToEmail, replyToGoogleVoiceText, markAsRead, deleteAllMatching (batchModify), countUnreadBySender. Recursive MIME body extractor (HTML OOM safety). GVoice parse helpers.
+- `email/GmailHistoryClient.kt` — copied verbatim v1.2. Delta-based history fetch (History API). `primeHistoryId()` returns `PrimeResult` enum (ALREADY_STORED, PRIMED_FROM_API, NO_TOKEN, API_ERROR, NETWORK_ERROR). Persistent historyId in SharedPreferences ("gmail_history").
+- `email/EmailRouter.kt` — copied verbatim v2.2. ConcurrentHashMap keyed by sender (phone digits / email lowercase). `routeReply()` does O(1) GVoice and email lookup. `sendEmailDirect()` for admin send-email command. `notifyOwner()` sends status email to self.
+- `email/EmailMonitor.kt` — copied verbatim v4.3. AtomicBoolean `isProcessing.compareAndSet()` prevents duplicate fetch from notification bursts. Primary path: History API delta. Fallback: `listUnread(maxResults=3)`. `processEmail()` routes GVoice vs regular email. Builds `com.aigentik.app.core.Message` objects for `MessageEngine.onMessageReceived()`.
+- `core/MessageEngine.kt` — updated to v2.0. Removed inner `Message`/`Channel` — now uses top-level `Message`. Email/GVoice channel reply via `EmailRouter.routeReply()`. Admin `check_email` → `GmailApiClient.countUnreadBySender()`. Admin `send_email` → `EmailRouter.sendEmailDirect()`. Status includes Gmail sign-in state.
+- `sms/AigentikNotificationListener.kt` — updated to v3.0. Gmail notifications now route to `EmailMonitor.onGmailNotification(applicationContext)` instead of stub. SMS builder updated to use top-level `Message(...)` and `Message.Channel.NOTIFICATION`.
+- `core/AigentikService.kt` — updated: `GoogleAuthManager.initFromStoredAccount()` called in `onCreate()`. `EmailRouter.init()` and `EmailMonitor.init()` called before `MessageEngine.configure()`. `GmailHistoryClient.primeHistoryId()` launched on IO thread at startup.
+- `app/build.gradle.kts` — added `com.google.code.gson:gson:2.10.1` (explicit Gson dep for GmailApiClient).
+
+### Full Pipeline (Stage 2)
+
+```
+Gmail notification
+  → AigentikNotificationListener.onNotificationPosted()
+  → EmailMonitor.onGmailNotification()
+  → GmailHistoryClient.getNewInboxMessageIds() [or listUnread fallback]
+  → GmailApiClient.getFullEmail()
+  → processEmail() → GVoice? or regular?
+  → EmailRouter.storeGVoiceContext() / storeEmailContext()
+  → MessageEngine.onMessageReceived(Message(channel=EMAIL))
+  → handlePublicMessage()
+  → AgentLLMFacade.generateSmsReply()
+  → EmailRouter.routeReply(sender, reply)
+  → GmailApiClient.replyToGoogleVoiceText() / replyToEmail()
+```
+
+### Architecture Notes
+
+- `Message` is top-level in `com.aigentik.app.core.Message` — AigentikNotificationListener imports it directly.
+- `EmailRouter` and `EmailMonitor` are `object` singletons (not Koin) — consistent with all agent-layer engines.
+- `GoogleAuthManager.initFromStoredAccount()` restores Google sign-in state on service restart — required so `getFreshToken()` succeeds without a fresh sign-in on every reboot.
+- `GmailHistoryClient.primeHistoryId()` fires on every service start. If not signed in → returns `NO_TOKEN` immediately (no harm). After first sign-in and Gmail notification → stores historyId for delta-based processing.
+- Two-SmolLM instances issue remains (AgentLLMFacade + SmolLMManager for chat UI). Stage 3 item.
+
+### Testing — What You Need (Stage 2 additions)
+
+1. **Google sign-in**: Launch app → Settings → Sign in with Google → grant Gmail permissions when prompted
+2. **Gmail notification**: Receive an email → check logcat `adb logcat -s EmailMonitor,GmailHistoryClient,GmailApiClient,EmailRouter` → should see history fetch, email processing, reply sent
+3. **Admin email check**: SMS "check email" from admin number → should get unread count summary back
+4. **GVoice**: If using Google Voice → receive GVoice text → should route through Email pipeline and reply back via Gmail
+
+### Known Gaps (Stage 3)
+
+- Gmail sign-in UI not yet added to Settings screen — user must sign in manually (no UI trigger)
+- `scopeResolutionListener` not wired to a SettingsActivity — `UserRecoverableAuthException` consent dialog can't auto-launch without it
+- `ownerNotifier` still only logs to logcat (no push notification UI)
+- Two LLM instances (AgentLLMFacade + SmolLMManager) — share model in Stage 3
+- Conversation history not persisted (no ConversationHistoryDatabase)
+
+---

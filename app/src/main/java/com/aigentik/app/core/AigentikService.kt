@@ -27,7 +27,11 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aigentik.app.R
 import com.aigentik.app.ai.AgentLLMFacade
+import com.aigentik.app.auth.GoogleAuthManager
 import com.aigentik.app.data.AppDB
+import com.aigentik.app.email.EmailMonitor
+import com.aigentik.app.email.EmailRouter
+import com.aigentik.app.email.GmailHistoryClient
 import com.aigentik.app.system.ConnectionWatchdog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,12 +90,15 @@ class AigentikService : Service() {
         // Load channel states from persisted settings
         ChannelManager.loadFromSettings()
 
-        // Start OAuth session watchdog (OAuth checks stubbed until Stage 2)
+        // Restore Google account from persistent sign-in (needed before EmailMonitor)
+        GoogleAuthManager.initFromStoredAccount(this)
+
+        // Start OAuth session watchdog
         ConnectionWatchdog.start(this)
 
         Log.i(TAG, "Foreground service started — process will stay alive")
 
-        // Stage 1: Initialize agent engines
+        // Stage 2: Initialize agent engines (SMS/RCS + Gmail)
         initAgentEngines()
     }
 
@@ -106,6 +113,12 @@ class AigentikService : Service() {
             }
         }
 
+        // Init EmailRouter and EmailMonitor (no I/O — immediate)
+        // EmailRouter must be initialized BEFORE MessageEngine.configure() so that
+        // if a Gmail notification arrives during startup, routeReply() has appContext set.
+        EmailRouter.init(this)
+        EmailMonitor.init(this)
+
         // Configure MessageEngine (no I/O — immediate)
         MessageEngine.configure(
             context       = this,
@@ -118,6 +131,14 @@ class AigentikService : Service() {
             },
             wakeLock      = wakeLock,
         )
+
+        // Prime Gmail historyId (IO — launch on background thread)
+        // If not signed in, primeHistoryId returns NO_TOKEN immediately — no harm done.
+        // On first sign-in, EmailMonitor's listUnread fallback handles the initial batch.
+        serviceScope.launch {
+            val result = GmailHistoryClient.primeHistoryId(this@AigentikService)
+            Log.i(TAG, "GmailHistoryClient.primeHistoryId: $result")
+        }
 
         // Load LLM model (slow — launch on IO, app is already running in foreground)
         serviceScope.launch {

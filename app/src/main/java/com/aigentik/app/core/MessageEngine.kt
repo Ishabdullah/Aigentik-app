@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.aigentik.app.ai.AgentLLMFacade
 import com.aigentik.app.auth.AdminAuthManager
+import com.aigentik.app.email.EmailRouter
+import com.aigentik.app.email.GmailApiClient
 import com.aigentik.app.sms.NotificationReplyRouter
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -13,8 +15,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-// MessageEngine v1.0 — Stage 1: SMS/RCS only
-// Ported from aigentik-android MessageEngine v2.2 — email actions stubbed for Stage 2.
+// MessageEngine v2.0 — Stage 2: SMS/RCS + Gmail + Google Voice
+// v2.0: Email reply path enabled via EmailRouter (Stage 2).
+//   - Message and Message.Channel are now top-level (core/Message.kt).
+//   - EMAIL and GVOICE channels route replies via EmailRouter.routeReply().
+//   - Admin check_email command fetches unread count from GmailApiClient.
+//   - Admin send_email command routes via EmailRouter.sendEmailDirect().
+//
+// v1.0: SMS/RCS only — email actions stubbed.
 //
 // Key design choices:
 //   - messageMutex: serializes ALL message handlers — only one runs at a time.
@@ -22,11 +30,8 @@ import kotlinx.coroutines.sync.withLock
 //     the same 128MB KV cache simultaneously → memory fragmentation/crash).
 //   - Admin auth via AdminAuthManager: SMS admin login with session management.
 //   - Public messages: ContactEngine for sender lookup, AgentLLMFacade for reply.
-//   - Reply routing: NotificationReplyRouter for inline SMS/RCS replies.
+//   - Reply routing: NotificationReplyRouter for SMS/RCS, EmailRouter for email.
 //   - PARTIAL_WAKE_LOCK acquired per-handler (passed in from AigentikService).
-//
-// Stage 2 additions: EmailMonitor, GmailApiClient, DestructiveActionGuard,
-//   ConversationHistoryDatabase, AigentikPersona.
 object MessageEngine {
 
     private const val TAG = "MessageEngine"
@@ -49,20 +54,6 @@ object MessageEngine {
     // chatNotifier posts messages into the chat UI so they appear in history
     @Volatile var chatNotifier: ((String) -> Unit)? = null
 
-    // ─── Message model ────────────────────────────────────────────────────────
-
-    data class Message(
-        val id: String,                  // dedupKey fingerprint — used for inline reply routing
-        val channel: Channel,
-        val sender: String,              // normalized phone or email
-        val senderName: String?,
-        val body: String,
-        val subject: String? = null,     // email only (Stage 2)
-        val packageName: String = "",
-    )
-
-    enum class Channel { NOTIFICATION, SMS, EMAIL, CHAT, GVOICE }
-
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     fun configure(
@@ -80,7 +71,7 @@ object MessageEngine {
         this.ownerNotifier = ownerNotifier
         this.wakeLock      = wakeLock
         AgentLLMFacade.configure(agentName, ownerName)
-        Log.i(TAG, "$agentName MessageEngine configured (Stage 1 — SMS/RCS)")
+        Log.i(TAG, "$agentName MessageEngine configured (Stage 2 — SMS/RCS + Email)")
     }
 
     // Prime context from ChatActivity.onCreate() before AigentikService completes startup
@@ -101,7 +92,7 @@ object MessageEngine {
         }
 
         // Admin check — CHAT is always trusted; remote channels need session/login
-        val isAdminChannel = message.channel == Channel.CHAT
+        val isAdminChannel = message.channel == Message.Channel.CHAT
 
         if (!isAdminChannel) {
             // Check for admin login format: Admin: Ish\nPassword: xxxx\n<command>
@@ -196,12 +187,12 @@ object MessageEngine {
                     val reply = AgentLLMFacade.generateChatReply(input)
                     notify(reply)
                     // If admin is chatting via SMS (not chat screen), reply back
-                    if (message.channel != Channel.CHAT) {
+                    if (message.channel != Message.Channel.CHAT) {
                         replyToSender(message, reply)
                     }
                 } else {
                     notify("Try: status, channels, find [name], or just ask me anything.")
-                    if (message.channel != Channel.CHAT) {
+                    if (message.channel != Message.Channel.CHAT) {
                         replyToSender(message, "Loading... try again in a moment.")
                     }
                 }
@@ -289,15 +280,37 @@ object MessageEngine {
                     val ai = AgentLLMFacade.getStateLabel()
                     val contacts = ContactEngine.getCount()
                     val channels = ChannelManager.statusSummary()
-                    notify("$agentName Status:\nAI: $ai\nContacts: $contacts\nChannels:\n$channels")
+                    val emailStatus = if (appContext?.let { com.aigentik.app.auth.GoogleAuthManager.isSignedIn(it) } == true)
+                        "signed in" else "not signed in"
+                    notify("$agentName Status:\nAI: $ai\nContacts: $contacts\nEmail: $emailStatus\nChannels:\n$channels")
                 }
 
                 "send_sms" -> {
                     notify("Sending new messages is not in my capabilities — I can only reply to messages I receive.")
                 }
 
+                "send_email" -> {
+                    val to = result.target ?: run { notify("Who should I email?"); return }
+                    val body = result.content ?: run { notify("What should I say?"); return }
+                    val sent = EmailRouter.sendEmailDirect(to, "$agentName message", body)
+                    notify(if (sent) "Email sent to $to." else "Failed to send email to $to. Check Gmail sign-in.")
+                }
+
                 "check_email", "read_email", "list_email" -> {
-                    notify("Email monitor not yet active — available in Stage 2.")
+                    val ctx = appContext
+                    if (ctx != null && com.aigentik.app.auth.GoogleAuthManager.isSignedIn(ctx)) {
+                        val summary = GmailApiClient.countUnreadBySender(ctx)
+                        if (summary.isEmpty()) {
+                            notify("No unread emails.")
+                        } else {
+                            val top = summary.entries.sortedByDescending { it.value }.take(8)
+                            val lines = top.joinToString("\n") { "${it.key}: ${it.value}" }
+                            val total = summary.values.sum()
+                            notify("$total unread email(s) by sender:\n$lines")
+                        }
+                    } else {
+                        notify("Gmail not signed in — sign in via Settings to use email features.")
+                    }
                 }
 
                 "sync_contacts" -> {
@@ -318,7 +331,7 @@ object MessageEngine {
                             notify("Sending new messages is not in my capabilities — I can only reply to messages I receive.")
 
                         lower2.contains("email") ->
-                            notify("Email integration available in Stage 2.")
+                            notify("Email active. Say 'check email' to see unread, or 'send email to [address]'.")
 
                         else -> {
                             // Genuine conversation that slipped past fast-path
@@ -326,11 +339,11 @@ object MessageEngine {
                                 Log.d(TAG, "handleAdminCommand: fallback → generateChatReply")
                                 val reply = AgentLLMFacade.generateChatReply(input)
                                 notify(reply)
-                                if (message.channel != Channel.CHAT) {
+                                if (message.channel != Message.Channel.CHAT) {
                                     replyToSender(message, reply)
                                 }
                             } else {
-                                notify("Try: status, channels, find [name], or just ask me anything.")
+                                notify("Try: status, channels, find [name], check email, or just ask me anything.")
                             }
                         }
                     }
@@ -373,14 +386,16 @@ object MessageEngine {
                 )
 
                 when (message.channel) {
-                    Channel.NOTIFICATION -> {
+                    Message.Channel.NOTIFICATION -> {
                         val sent = NotificationReplyRouter.sendReply(message.id, reply)
                         if (!sent) {
                             Log.w(TAG, "Inline reply failed for ${message.sender}")
                             notify("Could not send reply to ${contact.name ?: message.sender} — notification was dismissed")
                         }
                     }
-                    Channel.EMAIL -> notify("Email reply not wired yet — Stage 2")
+                    Message.Channel.EMAIL, Message.Channel.GVOICE -> {
+                        EmailRouter.routeReply(message.sender, reply)
+                    }
                     else -> Log.w(TAG, "Unknown channel ${message.channel} — cannot reply")
                 }
 
@@ -405,14 +420,14 @@ object MessageEngine {
 
     private fun replyToSender(message: Message, reply: String) {
         when (message.channel) {
-            Channel.NOTIFICATION -> {
+            Message.Channel.NOTIFICATION -> {
                 val sent = NotificationReplyRouter.sendReply(message.id, reply)
                 if (!sent) Log.w(TAG, "Inline reply failed for ${message.sender}")
             }
-            Channel.SMS   -> Log.w(TAG, "SMS channel reply skipped — SEND_SMS removed")
-            Channel.EMAIL -> Log.w(TAG, "Email reply not wired yet — Stage 2")
-            Channel.CHAT  -> notify(reply)
-            else          -> Log.w(TAG, "Unknown channel ${message.channel} — cannot reply")
+            Message.Channel.SMS    -> Log.w(TAG, "SMS channel reply skipped — SEND_SMS removed")
+            Message.Channel.EMAIL,
+            Message.Channel.GVOICE -> EmailRouter.routeReply(message.sender, reply)
+            Message.Channel.CHAT   -> notify(reply)
         }
     }
 
