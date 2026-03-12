@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "630924077353",
+    "project_id": "aigentik-android",
+    "storage_bucket": "aigentik-android.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:630924077353:android:5c58e1d30f7983771f2f38",
+        "android_client_info": {
+          "package_name": "com.aigentik.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "630924077353-gmv67c8n0lad1q5u9q6v8t41sf79l8uv.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aigentik.app",
+            "certificate_hash": "e67661285f6c279d1434c5662c1e174e32679d80"
+          }
+        },
+        {
+          "client_id": "630924077353-oopagdmapkve24ehb6pjppeph2bf292c.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXRjCb1kN40hf43z359ZcFEAz4Sdw8arA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "630924077353-oopagdmapkve24ehb6pjppeph2bf292c.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
