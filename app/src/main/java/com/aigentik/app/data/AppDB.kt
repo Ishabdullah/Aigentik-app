@@ -194,6 +194,14 @@ class AppDB(context: Context) {
     suspend fun addFolder(folderName: String) =
         db.folderDao().insertFolder(Folder(name = folderName))
 
+    /** Creates a folder and returns the new folder ID. */
+    suspend fun addFolderAndGetId(folderName: String): Long =
+        db.folderDao().insertFolder(Folder(name = folderName))
+
+    /** Moves an existing chat into a folder by updating its folderId. */
+    suspend fun moveChatToFolder(chat: Chat, folderId: Long) =
+        db.chatsDao().updateChat(chat.copy(folderId = folderId))
+
     suspend fun updateFolder(folder: Folder) = db.folderDao().updateFolder(folder)
 
     /** Deletes the folder from the Folder table only */

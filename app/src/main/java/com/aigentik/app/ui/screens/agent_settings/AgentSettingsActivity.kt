@@ -1,5 +1,7 @@
 package com.aigentik.app.ui.screens.agent_settings
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -20,10 +22,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -33,6 +37,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -41,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
@@ -48,12 +55,22 @@ import compose.icons.FeatherIcons
 import compose.icons.feathericons.ArrowLeft
 import com.aigentik.app.ai.AgentLLMFacade
 import com.aigentik.app.auth.GoogleAuthManager
+import com.aigentik.app.benchmark.BenchmarkRunner
+import com.aigentik.app.benchmark.ExperimentConfig
+import com.aigentik.app.benchmark.MetricsExporter
+import com.aigentik.app.core.AgentNotificationManager
 import com.aigentik.app.core.AigentikSettings
 import com.aigentik.app.core.ChannelManager
 import com.aigentik.app.core.ContactEngine
+import com.aigentik.app.data.AppDB
 import com.aigentik.app.email.GmailHistoryClient
 import com.aigentik.app.ui.theme.SmolLMAndroidTheme
 import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // AgentSettingsActivity — Aigentik agent configuration + Gmail OAuth
 //
@@ -76,8 +93,17 @@ class AgentSettingsActivity : ComponentActivity() {
         private const val TAG = "AgentSettingsActivity"
     }
 
+    private val appDB: AppDB by inject()
+
     // State that increments on resume/auth events to force UI recomposition
     private var refreshTrigger by mutableStateOf(0)
+
+    // Benchmark state (hoisted to Activity so it survives recomposition)
+    private var benchmarkRunning by mutableStateOf(false)
+    private var benchmarkProgress by mutableIntStateOf(0)
+    private var benchmarkTotal by mutableIntStateOf(0)
+    private var benchmarkResultText by mutableStateOf("")
+    private var benchmarkLastExportPath by mutableStateOf("")
 
     // Google Sign-In launcher
     private val signInLauncher = registerForActivityResult(
@@ -178,9 +204,82 @@ class AgentSettingsActivity : ComponentActivity() {
                     onSignOutClick = {
                         GoogleAuthManager.signOut(this) { refreshTrigger++ }
                     },
-                    onBackClick = { finish() },
+                    onBackClick   = { finish() },
+                    benchmarkRunning    = benchmarkRunning,
+                    benchmarkProgress   = benchmarkProgress,
+                    benchmarkTotal      = benchmarkTotal,
+                    benchmarkResultText = benchmarkResultText,
+                    benchmarkExportPath = benchmarkLastExportPath,
+                    onRunBenchmark = { corpusPath, experimentId ->
+                        runBenchmark(corpusPath, experimentId)
+                    },
+                    onShareResults = { shareBenchmarkResults(it) },
                 )
             }
+        }
+    }
+
+    private fun runBenchmark(corpusPath: String, experimentId: String) {
+        if (benchmarkRunning) return
+        benchmarkRunning    = true
+        benchmarkProgress   = 0
+        benchmarkTotal      = 0
+        benchmarkResultText = "Starting…"
+        benchmarkLastExportPath = ""
+
+        val config = ExperimentConfig(
+            experimentId = experimentId,
+            corpusPath   = corpusPath,
+            description  = "Run from settings UI",
+        )
+        lifecycleScope.launch {
+            try {
+                val dao    = appDB.taskMetricDao()
+                val runner = BenchmarkRunner(
+                    context    = applicationContext,
+                    config     = config,
+                    dao        = dao,
+                    onProgress = { done, total ->
+                        benchmarkProgress = done
+                        benchmarkTotal    = total
+                    },
+                )
+                val completed = runner.run()
+                val metrics   = dao.getForExperiment(experimentId)
+                val outPath   = MetricsExporter.export(applicationContext, config, metrics)
+                benchmarkLastExportPath = outPath ?: ""
+                benchmarkResultText = if (outPath != null)
+                    "$completed tasks complete. Results saved."
+                else
+                    "$completed tasks complete. Export failed."
+                AgentNotificationManager.postBenchmark(
+                    "[$experimentId] $benchmarkResultText"
+                )
+            } catch (e: Exception) {
+                benchmarkResultText = "Error: ${e.message?.take(120)}"
+                Log.e(TAG, "Benchmark failed", e)
+            } finally {
+                benchmarkRunning = false
+            }
+        }
+    }
+
+    private fun shareBenchmarkResults(path: String) {
+        try {
+            val csv = File(File(path), "metrics.csv")
+            val uri = FileProvider.getUriForFile(this, "$packageName.provider", csv)
+            startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/csv"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                    "Share benchmark results"
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Share failed: ${e.message}")
         }
     }
 }
@@ -193,6 +292,13 @@ private fun AgentSettingsScreen(
     onGrantGmailClick: () -> Unit,
     onSignOutClick: () -> Unit,
     onBackClick: () -> Unit,
+    benchmarkRunning: Boolean = false,
+    benchmarkProgress: Int = 0,
+    benchmarkTotal: Int = 0,
+    benchmarkResultText: String = "",
+    benchmarkExportPath: String = "",
+    onRunBenchmark: (corpusPath: String, experimentId: String) -> Unit = { _, _ -> },
+    onShareResults: (path: String) -> Unit = {},
 ) {
     // Auth state — re-read on every refreshTrigger change
     val isSignedIn by remember(refreshTrigger) {
@@ -205,6 +311,13 @@ private fun AgentSettingsScreen(
     val gmailGranted = GoogleAuthManager.gmailScopesGranted
     val hasPendingScope = GoogleAuthManager.hasPendingScopeResolution()
     val lastTokenError = GoogleAuthManager.lastTokenError
+
+    // Benchmark local fields
+    var corpusPath by rememberSaveable { mutableStateOf("") }
+    val defaultExpId = remember {
+        "exp_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+    }
+    var experimentId by rememberSaveable { mutableStateOf(defaultExpId) }
 
     // Settings fields — auto-save to SharedPreferences on change
     var agentName by rememberSaveable(refreshTrigger) { mutableStateOf(AigentikSettings.agentName) }
@@ -432,6 +545,81 @@ private fun AgentSettingsScreen(
                     StatusRow("AI Model", aiStatus)
                     StatusRow("Contacts", "$contactCount loaded")
                     StatusRow("Gmail", gmailStatus)
+                    StatusRow("Agent Folder", if (AgentNotificationManager.getFolderId() != -1L) "Ready" else "Pending restart")
+                }
+            }
+
+            // ─── Agent Pipeline Benchmark ─────────────────────────────────────
+            item {
+                SectionCard(title = "Agent Pipeline Benchmark") {
+                    Text(
+                        "Run end-to-end latency, battery, and thermal benchmarks against a JSONL task corpus.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = corpusPath,
+                        onValueChange = { corpusPath = it },
+                        label = { Text("Corpus file path") },
+                        placeholder = { Text("/sdcard/Download/corpus.jsonl") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !benchmarkRunning,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = experimentId,
+                        onValueChange = { experimentId = it },
+                        label = { Text("Experiment ID") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !benchmarkRunning,
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    if (benchmarkRunning) {
+                        val progress = if (benchmarkTotal > 0)
+                            benchmarkProgress.toFloat() / benchmarkTotal else 0f
+                        Text(
+                            "Running… $benchmarkProgress / $benchmarkTotal tasks",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        Button(
+                            onClick = { onRunBenchmark(corpusPath.trim(), experimentId.trim()) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = corpusPath.isNotBlank() && experimentId.isNotBlank(),
+                        ) {
+                            Text("Run Benchmark")
+                        }
+                    }
+
+                    if (benchmarkResultText.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            benchmarkResultText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (benchmarkResultText.startsWith("Error"))
+                                MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary,
+                        )
+                    }
+
+                    if (benchmarkExportPath.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { onShareResults(benchmarkExportPath) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Share metrics.csv")
+                        }
+                    }
                 }
                 Spacer(Modifier.height(16.dp))
             }

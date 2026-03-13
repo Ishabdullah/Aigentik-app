@@ -99,6 +99,15 @@ class AigentikService : Service() {
         Log.i(TAG, "Foreground service started — process will stay alive")
 
         // Stage 2: Initialize agent engines (SMS/RCS + Gmail)
+        // Stage 6: Init AgentNotificationManager (creates Aigentik folder + chats in Room DB)
+        serviceScope.launch {
+            try {
+                val appDB = GlobalContext.get().get<AppDB>()
+                AgentNotificationManager.init(appDB)
+            } catch (e: Exception) {
+                Log.e(TAG, "AgentNotificationManager init failed: ${e.message}")
+            }
+        }
         initAgentEngines()
     }
 
@@ -127,10 +136,13 @@ class AigentikService : Service() {
             agentName     = AigentikSettings.agentName,
             ownerNotifier = { msg ->
                 Log.i(TAG, "ownerNotifier: $msg")
-                // TODO Stage 2: post to owner notification channel
+                AgentNotificationManager.post(msg)
             },
             wakeLock      = wakeLock,
         )
+        // chatNotifier posts agent activity into the "Agent Activity" chat in the Aigentik folder.
+        // This makes every reply, policy block, and status update visible in the chat UI.
+        MessageEngine.chatNotifier = { msg -> AgentNotificationManager.post(msg) }
 
         // Prime Gmail historyId (IO — launch on background thread)
         // If not signed in, primeHistoryId returns NO_TOKEN immediately — no harm done.

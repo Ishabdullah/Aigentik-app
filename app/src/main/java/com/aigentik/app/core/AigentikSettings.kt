@@ -22,8 +22,11 @@ object AigentikSettings {
     private const val KEY_CHANNEL_PREFIX    = "channel_enabled_"
     private const val KEY_ADMIN_PASS_HASH   = "admin_password_hash"
     private const val KEY_ADMIN_USERNAME    = "admin_username"
-    private const val KEY_OAUTH_SIGNED_IN   = "oauth_signed_in"
-    private const val KEY_THEME_MODE        = "theme_mode"
+    private const val KEY_OAUTH_SIGNED_IN        = "oauth_signed_in"
+    private const val KEY_THEME_MODE             = "theme_mode"
+    private const val KEY_AGENT_NOTIF_FOLDER_ID  = "agent_notif_folder_id"
+    private const val KEY_AGENT_NOTIF_CHAT_ID    = "agent_notif_chat_id"
+    private const val KEY_BENCHMARK_CHAT_ID      = "benchmark_chat_id"
 
     private lateinit var prefs: SharedPreferences
 
@@ -87,6 +90,20 @@ object AigentikSettings {
     var modelPath: String
         get() = prefs.getString(KEY_MODEL_PATH, "") ?: ""
         set(v) = prefs.edit().putString(KEY_MODEL_PATH, v).apply()
+
+    // IDs of the auto-created "Aigentik" folder and its two chats.
+    // -1L means not yet created (first run or DB was cleared).
+    var agentNotifFolderId: Long
+        get() = prefs.getLong(KEY_AGENT_NOTIF_FOLDER_ID, -1L)
+        set(v) = prefs.edit().putLong(KEY_AGENT_NOTIF_FOLDER_ID, v).apply()
+
+    var agentNotifChatId: Long
+        get() = prefs.getLong(KEY_AGENT_NOTIF_CHAT_ID, -1L)
+        set(v) = prefs.edit().putLong(KEY_AGENT_NOTIF_CHAT_ID, v).apply()
+
+    var benchmarkChatId: Long
+        get() = prefs.getLong(KEY_BENCHMARK_CHAT_ID, -1L)
+        set(v) = prefs.edit().putLong(KEY_BENCHMARK_CHAT_ID, v).apply()
 
     fun setChannelEnabled(channelName: String, enabled: Boolean) {
         prefs.edit().putBoolean("$KEY_CHANNEL_PREFIX$channelName", enabled).apply()
