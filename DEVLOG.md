@@ -198,6 +198,11 @@ User taps ⋮ → "Aigentik Settings"
 3. **Channels** — SMS/RCS, Email, Google Voice toggles (saved immediately via ChannelManager)
 4. **Status** — AI model state (AgentLLMFacade.getStateLabel()), contact count, Gmail status
 
+### Bug Fixes (same session, 2026-03-13)
+
+- `GoogleAuthManager.kt:120` — `Account(account.email, ...)` failed with `String?` vs `String`. Fixed: `account.email ?: ""`.
+- `res/values/strings.xml` — `label_device_ram` used unnamed `%.2f` printf placeholders triggering `mergeDebugResources` warning. Fixed: added `formatted="false"` attribute.
+
 ### Known Gaps (Stage 4)
 
 - Admin password management not yet in settings UI (still set only via `AdminAuthManager.hashPassword` programmatically)

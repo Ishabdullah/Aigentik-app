@@ -105,7 +105,7 @@
     <string name="dialog_edit_folder_name_title">Edit Folder Name</string>
     <string name="dialog_edit_folder_button_text">Edit</string>
     <string name="edit_chat_message_done">Done</string>
-    <string name="label_device_ram">Device RAM: %.2f GB used of %.2f GB total</string>
+    <string name="label_device_ram" formatted="false">Device RAM: %.2f GB used of %.2f GB total</string>
     <string name="download_model_step_title">Step 1: Download the model</string>
     <string name="import_model_step_title">Step 2: Import the model</string>
     <string name="import_model_step_des">Select the .gguf model you downloaded in step 1. The app will copy the model to its internal storage.</string>

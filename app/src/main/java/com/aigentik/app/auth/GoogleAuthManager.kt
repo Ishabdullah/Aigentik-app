@@ -117,7 +117,7 @@ object GoogleAuthManager {
                 return@withContext null
             }
             val androidAccount = account.account
-                ?: Account(account.email, "com.google")
+                ?: Account(account.email ?: "", "com.google")
             // Request all scopes (sign-in + Gmail) — GoogleAuthUtil handles incremental consent
             val allScopes = SCOPES + GMAIL_SCOPES
             val scope = "oauth2:${allScopes.joinToString(" ")}"
