@@ -10,6 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.aigentik.app.benchmark.TaskMetric
 import com.aigentik.app.benchmark.TaskMetricDao
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import org.koin.core.annotation.Single
 import java.util.Date
 
@@ -195,8 +196,11 @@ class AppDB(context: Context) {
         db.folderDao().insertFolder(Folder(name = folderName))
 
     /** Creates a folder and returns the new folder ID. */
-    suspend fun addFolderAndGetId(folderName: String): Long =
+    suspend fun addFolderAndGetId(folderName: String): Long {
         db.folderDao().insertFolder(Folder(name = folderName))
+        return db.folderDao().getFolders().first()
+            .lastOrNull { it.name == folderName }?.id ?: -1L
+    }
 
     /** Moves an existing chat into a folder by updating its folderId. */
     suspend fun moveChatToFolder(chat: Chat, folderId: Long) =
