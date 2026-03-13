@@ -5,13 +5,48 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import com.aigentik.app.benchmark.TaskMetric
+import com.aigentik.app.benchmark.TaskMetricDao
 import kotlinx.coroutines.flow.Flow
 import org.koin.core.annotation.Single
 import java.util.Date
 
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `task_metrics` (
+                `taskId` TEXT NOT NULL PRIMARY KEY,
+                `experimentId` TEXT NOT NULL,
+                `taskType` TEXT NOT NULL,
+                `modelTier` TEXT NOT NULL,
+                `startTimestampMs` INTEGER NOT NULL,
+                `endTimestampMs` INTEGER NOT NULL,
+                `latencyMs` INTEGER NOT NULL,
+                `tokenCount` INTEGER NOT NULL,
+                `tokensPerSecond` REAL NOT NULL,
+                `ramBeforeMb` INTEGER NOT NULL,
+                `ramPeakMb` INTEGER NOT NULL,
+                `ramAfterMb` INTEGER NOT NULL,
+                `batteryPercentBefore` REAL NOT NULL,
+                `batteryPercentAfter` REAL NOT NULL,
+                `thermalStatus` INTEGER NOT NULL,
+                `confidenceScore` REAL NOT NULL,
+                `policyDecision` TEXT NOT NULL,
+                `actionExecuted` INTEGER NOT NULL,
+                `outputQualityScore` REAL,
+                `oomKill` INTEGER NOT NULL,
+                `errorCode` TEXT
+            )
+        """.trimIndent())
+    }
+}
+
 @Database(
-    entities = [Chat::class, ChatMessage::class, LLMModel::class, Task::class, Folder::class],
-    version = 1,
+    entities = [Chat::class, ChatMessage::class, LLMModel::class, Task::class, Folder::class,
+                TaskMetric::class],
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -25,12 +60,16 @@ abstract class AppRoomDatabase : RoomDatabase() {
     abstract fun taskDao(): TaskDao
 
     abstract fun folderDao(): FolderDao
+
+    abstract fun taskMetricDao(): TaskMetricDao
 }
 
 @Single
 class AppDB(context: Context) {
     private val db =
-        Room.databaseBuilder(context, AppRoomDatabase::class.java, "app-database").build()
+        Room.databaseBuilder(context, AppRoomDatabase::class.java, "app-database")
+            .addMigrations(MIGRATION_1_2)
+            .build()
 
     /** Get all chats from the database sorted by dateUsed in descending order. */
     fun getChats(): Flow<List<Chat>> = db.chatsDao().getChats()
@@ -168,4 +207,8 @@ class AppDB(context: Context) {
         db.folderDao().deleteFolder(folderId)
         db.chatsDao().deleteChatsInFolder(folderId)
     }
+
+    // Agent Pipeline Benchmark Metrics
+
+    fun taskMetricDao() = db.taskMetricDao()
 }

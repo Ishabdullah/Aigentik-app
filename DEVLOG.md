@@ -273,3 +273,93 @@ Options (pick highest-impact for grant demo):
 Priority order per CLAUDE.md: Benchmark Infrastructure → Action Policy Engine.
 
 ---
+
+## 2026-03-13 — Session 7: Agent Pipeline Benchmark Infrastructure
+
+### Implemented
+
+- `benchmark/ExperimentConfig.kt` — data class mapping to EVALUATION_PROTOCOL.md §ExperimentConfig.
+  Fields: experimentId, modelTier, corpusPath, maxTasks, enableAdaptiveRouting, energyPolicyEnabled,
+  contextSizeTokens, description. Companion object holds task type and policy decision constants.
+
+- `benchmark/MetricsStore.kt` — Room `@Entity TaskMetric` + `@Dao TaskMetricDao`.
+  Schema matches EVALUATION_PROTOCOL.md §TaskMetric exactly (21 fields): taskId, experimentId,
+  taskType, modelTier, timing, token throughput, RAM (before/peak/after), battery (before/after),
+  thermalStatus, confidenceScore, policyDecision, actionExecuted, outputQualityScore, oomKill, errorCode.
+  Dao: insert, insertAll, getForExperiment, getRecent, deleteExperiment, countForExperiment.
+
+- `benchmark/LatencyTracer.kt` — per-task timestamp tracer. Marks 9 pipeline stages:
+  NOTIFICATION_RECEIVED → ROUTING_START → LLM_LOAD_START → LLM_LOAD_END →
+  INFERENCE_START → FIRST_TOKEN → INFERENCE_END → POLICY_CHECK → ACTION_EXECUTED.
+  Helpers: totalLatencyMs(), inferenceLatencyMs(), ttftMs(), modelLoadLatencyMs().
+
+- `benchmark/BatteryStatsCollector.kt` — snapshot battery % from BatteryManager
+  (with sticky broadcast fallback for OEMs that don't support BATTERY_PROPERTY_CAPACITY).
+  isCharging() for ChargingWindowDetector use in Stage 4 scheduler.
+
+- `benchmark/ThermalStateCollector.kt` — reads PowerManager.currentThermalStatus (API 29+).
+  statusLabel() maps int → string for export. isThermallyConstrained() for SEVERE+ gating.
+
+- `benchmark/BenchmarkRunner.kt` — drives experiment runs against JSONL task corpus.
+  Reads corpus (one JSON task per line), routes by task type to AgentLLMFacade methods,
+  measures latency/battery/thermal/RAM per task, writes TaskMetric rows to Room via TaskMetricDao.
+  Error rows written on exception so experiment record is complete. Progress callback via onProgress.
+  Token count: character-based heuristic (~4 chars/token) — SmolLM is synchronous (no streaming).
+
+- `benchmark/MetricsExporter.kt` — exports experiment results to
+  `<filesDir>/results/<experimentId>/`: config.json, metrics.csv, summary.json, thermal_trace.csv.
+  summary.json includes latency percentiles (p50/p90/p99), mean tps, battery delta, per-type breakdown,
+  thermal distribution. No WRITE_EXTERNAL_STORAGE required (app-private storage).
+
+- `data/AppDB.kt` — version bumped 1 → 2. Added `TaskMetric` to `@Database` entities list.
+  Added `MIGRATION_1_2` (creates `task_metrics` table with all 21 columns).
+  Added `abstract fun taskMetricDao(): TaskMetricDao` to `AppRoomDatabase`.
+  Added `.addMigrations(MIGRATION_1_2)` to `Room.databaseBuilder`.
+  Added `fun taskMetricDao() = db.taskMetricDao()` helper on `AppDB`.
+
+### Architecture Notes
+
+- BenchmarkRunner uses `AgentLLMFacade.generateSmsReply()` / `generateChatReply()` directly —
+  SmolLM is synchronous (no streaming), so FIRST_TOKEN is marked immediately after inference returns.
+- Token count is estimated (output.length / 4) — sufficient for throughput ranking across experiments.
+  If precise token counts are needed, smollm module's `SmolLM.getTokenCount()` can be wired later.
+- MetricsExporter writes to app-private `filesDir` — no WRITE_EXTERNAL_STORAGE permission needed.
+  Share via FileProvider (android.support.FILE_PROVIDER_PATHS) if on-device export is required.
+- Room migration is additive only — no existing tables touched, no data loss on upgrade.
+
+### How to Run a Benchmark
+
+```kotlin
+// In a ViewModel or Service coroutine:
+val dao = koin.get<AppDB>().taskMetricDao()
+val config = ExperimentConfig(
+    experimentId = "exp_baseline_001",
+    modelTier = "medium",
+    corpusPath = "${context.filesDir}/corpus/sms_100.jsonl",
+    description = "Baseline latency — Qwen 0.5B Q4 on Samsung S25"
+)
+val runner = BenchmarkRunner(context, config, dao)
+val completed = runner.run()
+
+val metrics = dao.getForExperiment("exp_baseline_001")
+val outPath = MetricsExporter.export(context, config, metrics)
+// results at: <filesDir>/results/exp_baseline_001/
+```
+
+### Known Gaps (Stage 5)
+
+- No corpus files bundled — user must create JSONL files manually or build a CorpusGenerator
+- `confidenceScore` and `outputQualityScore` are placeholders (1.0 and null) — wire to ActionPolicyEngine and reference scoring in Stage 5
+- `policyDecision` always "allow" — wire to ActionPolicyEngine when implemented
+- `modelLoadLatencyMs` not captured in BenchmarkRunner (load happens inside AgentLLMFacade transparently) — LatencyTracer LLM_LOAD_START/END markers are adjacent; patch when AgentLLMFacade exposes load callbacks
+- enableAdaptiveRouting / energyPolicyEnabled config fields are stored but not yet acted on (ModelRouter and InferenceScheduler not yet implemented)
+
+### Next Session: Start Here — Stage 5
+
+Options (priority order per CLAUDE.md):
+1. **Action Policy Engine** — `ActionSchema.kt`, `ActionSchemaValidator.kt`, `RiskScorer.kt`, `ActionPolicyEngine.kt` in `app/.../agent/`. Wire into MessageEngine so every action passes through it. BenchmarkRunner.policyDecision will auto-populate.
+2. **Adaptive Model Routing** — `TaskClassifier.kt`, `ModelProfile.kt`, `ModelRouter.kt`. Needed to make enableAdaptiveRouting in ExperimentConfig functional.
+3. **Corpus Generator** — build a script or in-app tool to generate the 500-task JSONL corpus (5 categories × 100 tasks) defined in EVALUATION_PROTOCOL.md.
+4. **Model sharing** — eliminate two JNI instances (AgentLLMFacade + SmolLMManager).
+
+---
