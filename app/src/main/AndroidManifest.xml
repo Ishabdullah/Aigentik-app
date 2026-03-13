@@ -71,6 +71,8 @@
         </activity>
         <activity android:name=".ui.screens.model_download.DownloadModelActivity" />
         <activity android:name=".ui.screens.manage_tasks.ManageTasksActivity" />
+        <activity android:name=".ui.screens.agent_settings.AgentSettingsActivity"
+            android:exported="false" />
         
         <!-- Foreground service — keeps process alive on Samsung and other aggressive OEMs -->
         <service

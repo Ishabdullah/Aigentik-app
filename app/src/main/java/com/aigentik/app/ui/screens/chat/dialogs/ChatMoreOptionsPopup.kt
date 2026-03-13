@@ -38,6 +38,7 @@ import compose.icons.feathericons.Folder
 import compose.icons.feathericons.Layout
 import compose.icons.feathericons.Package
 import compose.icons.feathericons.Settings
+import compose.icons.feathericons.Shield
 import compose.icons.feathericons.XCircle
 import compose.icons.feathericons.Zap
 import com.aigentik.app.R
@@ -54,6 +55,7 @@ private fun PreviewChatMoreOptionsPopup() {
         showRAMUsageLabel = true,
         onEditChatSettingsClick = {},
         onBenchmarkModelClick = {},
+        onAgentSettingsClick = {},
         onEvent = {},
     )
 }
@@ -65,6 +67,7 @@ fun ChatMoreOptionsPopup(
     showRAMUsageLabel: Boolean,
     onEditChatSettingsClick: () -> Unit,
     onBenchmarkModelClick: () -> Unit,
+    onAgentSettingsClick: () -> Unit,
     onEvent: (ChatScreenUIEvent) -> Unit,
 ) {
     DropdownMenu(
@@ -103,6 +106,11 @@ fun ChatMoreOptionsPopup(
                 icon = FeatherIcons.Zap,
                 text = stringResource(R.string.chat_options_benchmark_model),
                 onClick = onBenchmarkModelClick,
+            )
+            PopupMenuItem(
+                icon = FeatherIcons.Shield,
+                text = "Aigentik Settings",
+                onClick = onAgentSettingsClick,
             )
             Spacer(modifier = Modifier.height(4.dp))
             HorizontalDivider(modifier = Modifier.fillMaxWidth())

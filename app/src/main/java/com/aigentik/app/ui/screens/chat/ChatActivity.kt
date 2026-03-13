@@ -129,6 +129,7 @@ import com.aigentik.app.ui.screens.chat.dialogs.ChatMessageOptionsDialog
 import com.aigentik.app.ui.screens.chat.dialogs.ChatMoreOptionsPopup
 import com.aigentik.app.ui.screens.chat.dialogs.FolderOptionsDialog
 import com.aigentik.app.ui.screens.chat.dialogs.createChatMessageOptionsDialog
+import com.aigentik.app.ui.screens.agent_settings.AgentSettingsActivity
 import com.aigentik.app.ui.screens.manage_tasks.ManageTasksActivity
 import com.aigentik.app.ui.theme.SmolLMAndroidTheme
 import kotlinx.collections.immutable.ImmutableList
@@ -235,6 +236,11 @@ class ChatActivity : ComponentActivity() {
                                 )
                             },
                             onBenchmarkModelClick = { navController.navigate(BenchmarkModelRoute) },
+                            onAgentSettingsClick = {
+                                startActivity(
+                                    Intent(this@ChatActivity, AgentSettingsActivity::class.java)
+                                )
+                            },
                             viewModel::onEvent,
                         )
                     }
@@ -279,6 +285,7 @@ private fun PreviewChatActivityScreenUI() {
             ),
         onEditChatParamsClick = { _, _ -> },
         onBenchmarkModelClick = {},
+        onAgentSettingsClick = {},
         onEvent = {},
     )
 }
@@ -289,6 +296,7 @@ fun ChatActivityScreenUI(
     uiState: ChatScreenUIState,
     onEditChatParamsClick: (Chat, Int) -> Unit,
     onBenchmarkModelClick: () -> Unit,
+    onAgentSettingsClick: () -> Unit,
     onEvent: (ChatScreenUIEvent) -> Unit,
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -365,6 +373,7 @@ fun ChatActivityScreenUI(
                                         )
                                     },
                                     onBenchmarkModelClick = { onBenchmarkModelClick() },
+                                    onAgentSettingsClick = { onAgentSettingsClick() },
                                     onEvent = onEvent,
                                 )
                             }

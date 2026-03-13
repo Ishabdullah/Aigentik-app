@@ -166,3 +166,54 @@ Gmail notification
 - Conversation history not persisted (no ConversationHistoryDatabase)
 
 ---
+
+## 2026-03-12 — Session 5: Stage 3 — Agent Settings UI
+
+### Implemented
+
+- `ui/screens/agent_settings/AgentSettingsActivity.kt` — already existed with complete implementation (Compose, sign-in launcher, Gmail scope consent launcher, scopeResolutionListener in onResume/onPause, channel toggles, status section). Fixed: replaced Java reflection for email lookup with `AigentikSettings.gmailAddress`. Added email display in the "hasPendingScope" state (user signed in but scopes not yet granted).
+- `ui/screens/agent_settings/AgentSettingsViewModel.kt` — @KoinViewModel ViewModel for future use; registers with Koin but not yet wired to AgentSettingsActivity (which uses its own inline Compose state).
+- `ui/screens/agent_settings/AgentSettingsScreen.kt` — standalone Compose screen composable backed by AgentSettingsViewModel; dead code for now (Activity uses its own private composable), but compiles cleanly.
+- `AndroidManifest.xml` — registered `AgentSettingsActivity` (exported=false).
+- `ChatMoreOptionsPopup.kt` — added `onAgentSettingsClick: () -> Unit` parameter; added "Aigentik Settings" menu item with `FeatherIcons.Shield`.
+- `ChatActivity.kt` — imported `AgentSettingsActivity`; added `onAgentSettingsClick` parameter to `ChatActivityScreenUI`; wired up `Intent` to launch `AgentSettingsActivity` from the ⋮ menu; updated Preview.
+
+### Full OAuth Flow (now completable from UI)
+
+```
+User taps ⋮ → "Aigentik Settings"
+  → AgentSettingsActivity opens
+  → "Sign In with Google" → signInLauncher → GoogleAuthManager.onSignInSuccess()
+  → getFreshToken() fires → UserRecoverableAuthException
+  → scopeResolutionListener (set in onResume) → scopeConsentLauncher.launch(pendingIntent)
+  → User grants Gmail permissions in system dialog
+  → scopeConsentLauncher result → GoogleAuthManager.onScopeConsentGranted()
+  → GmailHistoryClient.primeHistoryId() → delta-based email processing active
+```
+
+### Settings Screen Sections
+
+1. **Google Account** — Sign in / Sign out / Grant Gmail Permissions button (shows when needed)
+2. **Agent Configuration** — Agent name, owner name, phone number (auto-saved on change to SharedPreferences)
+3. **Channels** — SMS/RCS, Email, Google Voice toggles (saved immediately via ChannelManager)
+4. **Status** — AI model state (AgentLLMFacade.getStateLabel()), contact count, Gmail status
+
+### Known Gaps (Stage 4)
+
+- Admin password management not yet in settings UI (still set only via `AdminAuthManager.hashPassword` programmatically)
+- `AgentSettingsViewModel` / `AgentSettingsScreen` are dead code — either wire them up or remove in Stage 4
+- Two LLM instances (AgentLLMFacade + SmolLMManager) — share model
+- Conversation history not persisted
+- No owner push notification (ownerNotifier still logs only)
+
+### Next Session: Start Here — Stage 4
+
+Options (pick highest-impact for grant demo):
+1. **Phase I Research: Benchmark Infrastructure** — `BenchmarkRunner.kt`, `MetricsStore.kt`, `LatencyTracer.kt` per `EVALUATION_PROTOCOL.md`
+2. **Phase I Research: Action Policy Engine** — `ActionSchema.kt`, `RiskScorer.kt`, `ActionPolicyEngine.kt` extending `DestructiveActionGuard`
+3. **Admin password UI** — add password fields to AgentSettingsActivity (minor)
+4. **Model sharing** — route AgentLLMFacade through SmolLMManager to eliminate two JNI instances
+
+Priority order per CLAUDE.md: Benchmark Infrastructure → Action Policy Engine.
+
+---
