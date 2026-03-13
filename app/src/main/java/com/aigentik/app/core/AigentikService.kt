@@ -140,22 +140,29 @@ class AigentikService : Service() {
             Log.i(TAG, "GmailHistoryClient.primeHistoryId: $result")
         }
 
-        // Load LLM model (slow — launch on IO, app is already running in foreground)
+        // Resolve + store the model path so AgentLLMFacade can reload on demand.
+        // Then do an eager warm-up load so the first incoming message doesn't pay
+        // the full 30-60s load penalty.
         serviceScope.launch {
             try {
                 val modelPath = resolveModelPath()
                 if (modelPath.isNotBlank()) {
+                    // Store path FIRST — ensureLoaded() inside loadModel() uses it
+                    AgentLLMFacade.storeModelPath(modelPath)
                     val ok = AgentLLMFacade.loadModel(modelPath)
                     if (ok) {
                         Log.i(TAG, "AgentLLMFacade ready — model: $modelPath")
+                        updateNotification("${AigentikSettings.agentName} ready")
                     } else {
-                        Log.w(TAG, "AgentLLMFacade load returned false — no model at: $modelPath")
+                        Log.w(TAG, "AgentLLMFacade load failed — will retry on first message")
+                        updateNotification("${AigentikSettings.agentName} active (model pending)")
                     }
                 } else {
                     Log.w(TAG, "No model found — download a model in the app, then restart")
+                    updateNotification("${AigentikSettings.agentName} active — no model loaded")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "AgentLLMFacade load failed: ${e.message}")
+                Log.e(TAG, "AgentLLMFacade load error: ${e.message}")
             }
         }
     }
@@ -197,6 +204,11 @@ class AigentikService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    fun updateNotification(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIFICATION_ID, buildNotification(text))
+    }
 
     private fun buildNotification(text: String): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)

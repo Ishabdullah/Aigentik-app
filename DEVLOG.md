@@ -198,6 +198,57 @@ User taps ⋮ → "Aigentik Settings"
 3. **Channels** — SMS/RCS, Email, Google Voice toggles (saved immediately via ChannelManager)
 4. **Status** — AI model state (AgentLLMFacade.getStateLabel()), contact count, Gmail status
 
+## 2026-03-13 — Session 6: On-demand LLM load + idle unload
+
+### Problem
+Model only responded when app was on screen. Root cause: `generateSmsReply` /
+`generateChatReply` / `interpretCommand` all had `if (!isReady()) return fallback`
+— so any message arriving before the ~30-60s eager load completed silently got
+the canned fallback reply. Service restarts (Samsung battery killer) made this
+window repeat every reboot.
+
+### Fix: AgentLLMFacade v2.0
+
+**`ensureLoaded()`** — on-demand load replacing the `isReady()` guard:
+- Cancels any pending idle-unload timer
+- If already READY → returns immediately
+- If another coroutine is already loading → all callers share one
+  `CompletableDeferred<Boolean>` (one native load, N waiters unblock together)
+- If NOT_LOADED → launches `doLoad()` in `facadeScope`, suspends until complete
+
+**`scheduleIdleUnload()`** — called at the end of every generation:
+- Starts a 60-second countdown coroutine
+- Next `ensureLoaded()` call cancels it → model stays loaded
+- After 60s with no activity → `unloadModel()` calls `smolLM.close()` → RAM freed
+
+**`storeModelPath(path)`** — called from `AigentikService` so the facade can
+reload on demand without being handed the path again.
+
+**`unloadModel()`** — `smolLM.close()` releases native pointer + VRAM/RAM.
+`state` → `NOT_LOADED`; next message triggers a fresh load.
+
+### AigentikService changes
+- Calls `AgentLLMFacade.storeModelPath(path)` before `loadModel()` (path now
+  cached independently of the eager load)
+- `updateNotification(text)` helper — notification now says "ready" vs "model
+  pending" so the user can see load state in the status bar
+- Eager warm-up load on service start still happens — first message pays
+  ~0s latency if it arrives after the warm-up; otherwise `ensureLoaded()`
+  blocks the reply coroutine until load finishes (no silent fallback)
+
+### Timing example (Samsung S25, Qwen 0.5B Q4)
+```
+Notification received  → ensureLoaded() called
+  model NOT_LOADED     → doLoad() starts (~30s)
+  reply coroutine      → suspends on deferred.await()
+  load completes       → deferred.complete(true)
+  reply coroutine      → unblocks, generates reply (~8s)
+  scheduleIdleUnload() → 60s timer starts
+  reply sent           ← total ~38s first message
+  [60s idle]           → unloadModel() called, RAM freed
+  next message         → repeat
+```
+
 ### Bug Fixes (same session, 2026-03-13)
 
 - `GoogleAuthManager.kt:120` — `Account(account.email, ...)` failed with `String?` vs `String`. Fixed: `account.email ?: ""`.

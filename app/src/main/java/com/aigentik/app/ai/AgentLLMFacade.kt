@@ -2,78 +2,90 @@ package com.aigentik.app.ai
 
 import android.util.Log
 import io.shubham0204.smollm.SmolLM
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-// AgentLLMFacade v1.0
-// Wraps SmolLM (llama.cpp JNI) with named generation methods for the agent layer.
-// Modeled on aigentik-android AiEngine v1.6 but uses SmolLM instead of LlamaJNI.
+// AgentLLMFacade v2.0
+// On-demand model loading + idle unload.
 //
-// Design:
-//   - Standalone SmolLM instance (NOT SmolLMManager) — agent inference is independent
-//     of the Chat UI's conversation history.
-//   - storeChats=false: each completion is stateless; KV context does not accumulate
-//     between agent calls. Safe for high-frequency SMS reply generation.
-//   - ReentrantLock serializes all JNI calls — SmolLM native context is NOT thread-safe.
-//   - System prompt is embedded in the user turn for each call so storeChats=false
-//     behavior (messages cleared after each completion) is fully compatible.
+// v2.0 changes:
+//   - ensureLoaded(): loads the model on first use if not already loaded.
+//     Multiple concurrent callers share one CompletableDeferred — only one
+//     native load runs at a time; all waiters unblock when it finishes.
+//   - scheduleIdleUnload(): starts a 60-second timer after each generation.
+//     If no new message arrives in that window the model is unloaded (RAM freed).
+//     Any incoming generation call cancels the timer and keeps the model loaded.
+//   - unloadModel(): calls SmolLM.close() to release the native context + RAM.
+//   - storeModelPath(): called from AigentikService so the facade can reload
+//     itself without being passed the path again.
+//   - All generation methods now call ensureLoaded() instead of checking isReady()
+//     and returning a fallback. The fallback is only used if the path is unknown
+//     or if the native load itself fails.
 //
-// Stage 1: SMS/RCS reply + admin command interpretation + chat reply
-// Stage 2: Email reply
+// v1.0: initial implementation (eager load only, fallback on not-ready)
 object AgentLLMFacade {
 
     private const val TAG = "AgentLLMFacade"
+    private const val IDLE_UNLOAD_DELAY_MS = 60_000L // 1 minute
 
     private val smolLM = SmolLM()
+
+    // JNI serialization lock — SmolLM native context is NOT thread-safe
     private val lock = ReentrantLock()
 
     private var agentName = "Aigentik"
     private var ownerName = "Owner"
+
+    // ─── State ────────────────────────────────────────────────────────────────
 
     enum class State { NOT_LOADED, LOADING, WARMING, READY, ERROR }
 
     @Volatile var state = State.NOT_LOADED
         private set
 
-    // Configure names — call BEFORE loadModel()
+    // ─── On-demand load coordination ──────────────────────────────────────────
+
+    // Cached path so the facade can reload itself after an idle unload
+    @Volatile private var cachedModelPath: String = ""
+
+    // Coroutine scope for the idle-unload timer and on-demand load launcher
+    private val facadeScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // Mutex guards loadDeferred creation — only one load runs at a time
+    private val loadMutex = Mutex()
+
+    // Shared deferred: all concurrent ensureLoaded() callers await this together
+    @Volatile private var loadDeferred: CompletableDeferred<Boolean>? = null
+
+    // ─── Idle unload timer ────────────────────────────────────────────────────
+
+    @Volatile private var idleUnloadJob: Job? = null
+
+    // ─── Public API ───────────────────────────────────────────────────────────
+
+    // Store the model path so ensureLoaded() can reload without service involvement.
+    // Call this from AigentikService immediately after resolving the path,
+    // before (or instead of) calling loadModel() directly.
+    fun storeModelPath(path: String) {
+        cachedModelPath = path
+        Log.d(TAG, "Model path stored: $path")
+    }
+
+    // Configure agent/owner names — call BEFORE any generation
     fun configure(agentName: String, ownerName: String) {
         this.agentName = agentName
         this.ownerName = ownerName
         Log.i(TAG, "AgentLLMFacade configured: agent=$agentName owner=$ownerName")
-    }
-
-    // Load model and warm up — called from AigentikService.onCreate() (IO thread)
-    suspend fun loadModel(modelPath: String): Boolean = withContext(Dispatchers.IO) {
-        if (state == State.LOADING || state == State.WARMING) {
-            Log.w(TAG, "Load already in progress")
-            return@withContext false
-        }
-        state = State.LOADING
-        Log.i(TAG, "Loading agent model: $modelPath")
-
-        return@withContext try {
-            smolLM.load(
-                modelPath,
-                SmolLM.InferenceParams(
-                    temperature = 0.7f,
-                    minP        = 0.05f,
-                    storeChats  = false, // Stateless: messages cleared after each completion
-                    numThreads  = 4,
-                )
-            )
-            Log.i(TAG, "Agent model loaded")
-            state = State.WARMING
-            warmUp()
-            state = State.READY
-            Log.i(TAG, "Agent model ready and warmed up")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Agent model load failed: ${e.message}")
-            state = State.ERROR
-            false
-        }
     }
 
     fun isReady() = state == State.READY
@@ -86,11 +98,116 @@ object AgentLLMFacade {
         State.ERROR      -> "Error"
     }
 
-    // Warm-up: fire a trivial 4-token prompt to prime JIT and KV cache.
-    // Takes ~2s but saves ~2s on the first real message.
+    // Explicit eager load — called from AigentikService on startup to warm up
+    // the model before the first message arrives. Falls through to ensureLoaded()
+    // internally so concurrent calls are safe.
+    suspend fun loadModel(modelPath: String): Boolean {
+        storeModelPath(modelPath)
+        return ensureLoaded()
+    }
+
+    // Unload the model and free native RAM.
+    // Called by the idle-unload timer; safe to call at any time.
+    fun unloadModel() {
+        if (state == State.NOT_LOADED) return
+        try {
+            lock.withLock { smolLM.close() }
+            Log.i(TAG, "AgentLLMFacade: model unloaded (RAM freed)")
+        } catch (e: Exception) {
+            Log.w(TAG, "unloadModel: ${e.message}")
+        } finally {
+            state = State.NOT_LOADED
+            idleUnloadJob = null
+        }
+    }
+
+    // ─── Core helpers ─────────────────────────────────────────────────────────
+
+    // Ensure the model is loaded before generating.
+    // If not loaded: starts a load (or joins an in-progress load) and suspends
+    // until it completes.  Cancels any pending idle-unload timer.
+    // Returns true if model is ready, false if path is unknown or load failed.
+    private suspend fun ensureLoaded(): Boolean {
+        // Cancel idle unload — we're about to use the model
+        idleUnloadJob?.cancel()
+        idleUnloadJob = null
+
+        if (state == State.READY) return true
+
+        // Get (or create) the shared load deferred under the mutex
+        val deferred: CompletableDeferred<Boolean> = loadMutex.withLock {
+            // Re-check: another coroutine may have finished while we waited for the lock
+            if (state == State.READY) return true
+
+            // Return existing deferred so we join the in-progress load
+            loadDeferred?.let { return@withLock it }
+
+            // No load in progress — start one
+            if (cachedModelPath.isBlank()) {
+                Log.w(TAG, "ensureLoaded: no model path — cannot load on demand")
+                return false
+            }
+
+            CompletableDeferred<Boolean>().also { d ->
+                loadDeferred = d
+                facadeScope.launch {
+                    val result = doLoad(cachedModelPath)
+                    loadMutex.withLock { loadDeferred = null }
+                    d.complete(result)
+                }
+            }
+        }
+
+        return deferred.await()
+    }
+
+    // Actual native load — always runs on IO, serialized by ensureLoaded()'s single launch
+    private suspend fun doLoad(modelPath: String): Boolean = withContext(Dispatchers.IO) {
+        if (state == State.LOADING || state == State.WARMING) {
+            Log.w(TAG, "doLoad: already in progress — skipping")
+            return@withContext false
+        }
+        state = State.LOADING
+        Log.i(TAG, "Loading agent model: $modelPath")
+
+        return@withContext try {
+            smolLM.load(
+                modelPath,
+                SmolLM.InferenceParams(
+                    temperature = 0.7f,
+                    minP        = 0.05f,
+                    storeChats  = false,
+                    numThreads  = 4,
+                )
+            )
+            Log.i(TAG, "Agent model loaded — warming up...")
+            state = State.WARMING
+            warmUp()
+            state = State.READY
+            Log.i(TAG, "Agent model ready")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Agent model load failed: ${e.message}")
+            state = State.ERROR
+            false
+        }
+    }
+
+    // Schedule model unload after IDLE_UNLOAD_DELAY_MS of inactivity.
+    // Any subsequent generation call cancels this via ensureLoaded().
+    private fun scheduleIdleUnload() {
+        idleUnloadJob?.cancel()
+        idleUnloadJob = facadeScope.launch {
+            delay(IDLE_UNLOAD_DELAY_MS)
+            Log.i(TAG, "AgentLLMFacade: idle timeout reached — unloading model")
+            unloadModel()
+        }
+        Log.d(TAG, "Idle unload scheduled in ${IDLE_UNLOAD_DELAY_MS / 1000}s")
+    }
+
+    // Warm-up: fire a trivial prompt to prime JIT and KV cache (~2s, saves ~2s on first real call)
     private fun warmUp() {
         try {
-            Log.i(TAG, "AgentLLMFacade: warming up...")
             lock.withLock {
                 smolLM.addSystemPrompt("You are a helpful assistant.")
                 smolLM.getResponse("Hello")
@@ -102,7 +219,7 @@ object AgentLLMFacade {
     }
 
     // ─── SMS reply ────────────────────────────────────────────────────────────
-    // 256 tokens, temperature=0.7 — concise, natural text message reply
+
     suspend fun generateSmsReply(
         senderName: String?,
         senderPhone: String,
@@ -114,8 +231,8 @@ object AgentLLMFacade {
         val signature = "\n\n— $agentName, personal agent of $ownerName. " +
             "If you need to reach $ownerName urgently, include \"$ownerName\" in your message."
 
-        if (!isReady()) {
-            Log.w(TAG, "generateSmsReply: model not ready — using fallback")
+        if (!ensureLoaded()) {
+            Log.w(TAG, "generateSmsReply: model unavailable — using fallback")
             return@withContext fallbackSmsReply(senderName, senderPhone) + signature
         }
 
@@ -147,18 +264,20 @@ object AgentLLMFacade {
         }
         val reply = raw?.trim() ?: ""
 
+        scheduleIdleUnload()
+
         if (reply.isEmpty()) fallbackSmsReply(senderName, senderPhone) + signature
         else reply + signature
     }
 
     // ─── Chat reply ───────────────────────────────────────────────────────────
-    // 512 tokens, no signature — for owner's in-app chat session
+
     suspend fun generateChatReply(
         message: String,
         conversationHistory: List<String> = emptyList()
     ): String = withContext(Dispatchers.IO) {
-        if (!isReady()) {
-            return@withContext "I'm not loaded yet. Go to Settings → AI Model to load a model."
+        if (!ensureLoaded()) {
+            return@withContext "Model is still loading — please try again in a moment."
         }
 
         val systemMsg = "You are $agentName, an AI personal assistant for $ownerName. " +
@@ -186,14 +305,16 @@ object AgentLLMFacade {
             null
         }
         val reply = raw?.trim() ?: ""
+
+        scheduleIdleUnload()
+
         if (reply.isEmpty()) "I couldn't generate a response. Please try again." else reply
     }
 
     // ─── Command interpretation ───────────────────────────────────────────────
-    // 120 tokens, temperature=0.0 (greedy) — deterministic JSON output
-    // Qwen3 trick: <think>\n\n</think>\n prefill suppresses chain-of-thought, saves 3-7s
+
     suspend fun interpretCommand(commandText: String): CommandResult = withContext(Dispatchers.IO) {
-        if (!isReady()) return@withContext parseSimpleCommandPublic(commandText)
+        if (!ensureLoaded()) return@withContext parseSimpleCommandPublic(commandText)
 
         val systemMsg = "You interpret commands for an AI assistant. " +
             "Return ONLY valid JSON with no extra text: " +
@@ -208,8 +329,6 @@ object AgentLLMFacade {
             "\"status\" -> {\"action\":\"status\",\"target\":null,\"content\":null,\"query\":null} " +
             "\"hello how are you\" -> {\"action\":\"unknown\",\"target\":null,\"content\":null,\"query\":null}"
 
-        // Qwen3 <think> prefill trick — suppresses chain-of-thought, saves 3-7s
-        // Appended to prompt so Qwen3 sees the think block already closed
         val userTurn = "Command: \"$commandText\""
 
         Log.d(TAG, "interpretCommand: generating for '$commandText'")
@@ -223,20 +342,19 @@ object AgentLLMFacade {
             return@withContext parseSimpleCommandPublic(commandText)
         }
 
+        scheduleIdleUnload()
+
         val clean = (raw ?: "")
             .replace(Regex("<think>[\\s\\S]*?</think>", setOf(RegexOption.IGNORE_CASE)), "")
             .replace(Regex("```json|```|<\\|im_end\\|>.*"), "")
             .trim()
         parseCommandJson(clean).also {
-            if (it.action == "unknown") {
-                // JSON parse returned unknown — fall back to regex parser
-                return@withContext parseSimpleCommandPublic(commandText)
-            }
+            if (it.action == "unknown") return@withContext parseSimpleCommandPublic(commandText)
         }
     }
 
     // ─── Regex-based command parser (no LLM) ─────────────────────────────────
-    // Instant — used as fast-path in MessageEngine before deciding whether to call interpretCommand()
+
     fun parseSimpleCommandPublic(text: String): CommandResult = parseSimpleCommand(text)
 
     private fun parseSimpleCommand(text: String): CommandResult {
@@ -299,7 +417,6 @@ object AgentLLMFacade {
         "personal AI assistant for $ownerName. " +
         "$ownerName will get back to you soon."
 
-    // Command result data class (mirrors aigentik-android AiEngine.CommandResult)
     data class CommandResult(
         val action: String,
         val target: String?,
