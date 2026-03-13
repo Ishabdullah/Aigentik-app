@@ -363,3 +363,79 @@ Options (priority order per CLAUDE.md):
 4. **Model sharing** — eliminate two JNI instances (AgentLLMFacade + SmolLMManager).
 
 ---
+
+## 2026-03-13 — Session 8: Action Policy Engine
+
+### Implemented
+
+- `agent/ActionSchema.kt` — sealed class hierarchy for all action types.
+  7 concrete types: StatusQuery, FindContact, CheckEmail (LOW risk);
+  AutoReply, SyncContacts, SetContactInstructions (MEDIUM);
+  SendEmail, Unknown (HIGH). Matches all action strings in MessageEngine's when-dispatch.
+
+- `agent/ActionSchemaValidator.kt` — converts AgentLLMFacade.CommandResult → typed ActionSchema.
+  Maps all known action strings to typed instances with field validation (e.g. SendEmail requires
+  non-blank `to` and `body` — missing fields → Unknown → BLOCK).
+  `autoReply()` helper builds ActionSchema.AutoReply for public message pipeline.
+
+- `agent/RiskScorer.kt` — maps ActionSchema → RiskTier (LOW / MEDIUM / HIGH).
+  SetContactInstructions with behavior "never"/"always" upgrades to HIGH (permanent policy change).
+  Unknown actions always score HIGH.
+
+- `agent/ActionPolicyEngine.kt` — central safety gate. Decision matrix:
+  - Admin trust: all known actions → ALLOW (admin is explicitly authenticated)
+  - Public + LOW risk: ALLOW
+  - Public + MEDIUM + confidence ≥ 0.75: ALLOW
+  - Public + MEDIUM + confidence < 0.75: BLOCK (REQUIRE_APPROVAL pending future UI)
+  - Public + HIGH: always BLOCK
+  - Unknown: always BLOCK regardless of trust
+  Confidence heuristic for public auto-replies: 0.5 if draft is a canned fallback, 0.9 otherwise.
+  Every decision is logged (ALLOW=DEBUG, PENDING=INFO, BLOCK=WARN) with reason string.
+  `decisionLabel()` returns "allow" | "require_approval" | "block" for benchmark CSV.
+
+- `core/MessageEngine.kt` — updated to v3.0. Policy gate inserted at two points:
+  1. Admin commands: after `interpretCommand()` → `ActionSchemaValidator.validate()` →
+     `ActionPolicyEngine.evaluateAdmin()` → BLOCK notifies owner with reason, returns early.
+  2. Public messages: after `generateSmsReply()` draft → `evaluatePublicReply()` →
+     BLOCK suppresses send, notifies owner with draft preview; ALLOW sends as before.
+
+- `benchmark/BenchmarkRunner.kt` — policy decision is now real (from ActionPolicyEngine)
+  instead of hardcoded "allow". `confidenceScore` and `actionExecuted` are also populated
+  from the PolicyDecision result.
+
+### Policy Decision Flow
+
+```
+Admin SMS command:
+  interpretCommand() → CommandResult
+    → ActionSchemaValidator.validate() → ActionSchema.SendEmail / FindContact / ...
+    → ActionPolicyEngine.evaluateAdmin() → always ALLOW for known actions
+    → execute action in MessageEngine when-dispatch
+
+Public inbound SMS:
+  generateSmsReply() → draft string
+    → ActionPolicyEngine.evaluatePublicReply() → AutoReply(confidence=0.9 or 0.5)
+    → ALLOW: NotificationReplyRouter.sendReply()
+    → BLOCK: notify owner "suppressed by policy: <reason>\nDraft: <preview>"
+```
+
+### Known Gaps (Stage 6)
+
+- REQUIRE_APPROVAL currently degrades to BLOCK — ApprovalWorkflow UI (push notification with
+  Approve/Deny actions) not yet built. Planned for Phase I, post-grant demo phase.
+- `outputQualityScore` still null — needs reference answer corpus or human eval pipeline.
+- Adaptive model routing (ModelRouter) still unimplemented — ExperimentConfig.enableAdaptiveRouting
+  has no effect yet.
+- No corpus JSONL files bundled — benchmark can't run without them.
+
+### Next Session: Start Here — Stage 6
+
+Options (priority order per CLAUDE.md):
+1. **Adaptive Model Routing** — `TaskClassifier.kt`, `ModelProfile.kt`, `DeviceStateReader.kt`,
+   `ModelRouter.kt` in `app/.../routing/`. Makes ExperimentConfig.enableAdaptiveRouting functional.
+2. **Corpus Generator** — 500-task JSONL corpus (5 categories × 100 tasks) per EVALUATION_PROTOCOL.md.
+   Can be a standalone Kotlin script or a CorpusBuilder in the benchmark package.
+3. **Energy-Adaptive Scheduler** — `InferenceScheduler.kt`, `ThermalPolicy.kt`, `BatteryPolicy.kt`.
+4. **Model sharing** — route AgentLLMFacade through SmolLMManager to eliminate two JNI instances.
+
+---

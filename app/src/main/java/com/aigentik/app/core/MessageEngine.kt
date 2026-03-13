@@ -2,6 +2,8 @@ package com.aigentik.app.core
 
 import android.content.Context
 import android.util.Log
+import com.aigentik.app.agent.ActionPolicyEngine
+import com.aigentik.app.agent.ActionSchemaValidator
 import com.aigentik.app.ai.AgentLLMFacade
 import com.aigentik.app.auth.AdminAuthManager
 import com.aigentik.app.email.EmailRouter
@@ -15,13 +17,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-// MessageEngine v2.0 — Stage 2: SMS/RCS + Gmail + Google Voice
-// v2.0: Email reply path enabled via EmailRouter (Stage 2).
-//   - Message and Message.Channel are now top-level (core/Message.kt).
-//   - EMAIL and GVOICE channels route replies via EmailRouter.routeReply().
-//   - Admin check_email command fetches unread count from GmailApiClient.
-//   - Admin send_email command routes via EmailRouter.sendEmailDirect().
+// MessageEngine v3.0 — Stage 4: Action Policy Engine
+// v3.0: All action execution gated through ActionPolicyEngine.
+//   - Admin commands: CommandResult → ActionSchemaValidator.validate() → evaluateAdmin()
+//     → ALLOW proceeds, BLOCK notifies owner with reason.
+//   - Public messages: generateSmsReply() draft → evaluatePublicReply()
+//     → ALLOW sends, BLOCK suppresses send and notifies owner.
+//   - Unknown/unrecognised actions are blocked at schema validation.
 //
+// v2.0: Email reply path enabled via EmailRouter (Stage 2).
 // v1.0: SMS/RCS only — email actions stubbed.
 //
 // Key design choices:
@@ -198,6 +202,16 @@ object MessageEngine {
                 }
                 return
             }
+
+            // ── Policy gate ───────────────────────────────────────────────────
+            val typedAction = ActionSchemaValidator.validate(result)
+            val pd = ActionPolicyEngine.evaluateAdmin(typedAction)
+            if (!pd.allowed) {
+                notify("Action blocked by policy: ${pd.reason}")
+                Log.w(TAG, "Policy BLOCK: ${pd.reason}")
+                return
+            }
+            // ─────────────────────────────────────────────────────────────────
 
             when (result.action) {
 
@@ -377,7 +391,7 @@ object MessageEngine {
             }
 
             if (shouldAutoReply) {
-                val reply = AgentLLMFacade.generateSmsReply(
+                val draft = AgentLLMFacade.generateSmsReply(
                     senderName           = message.senderName ?: contact.name,
                     senderPhone          = message.sender,
                     message              = message.body,
@@ -385,22 +399,34 @@ object MessageEngine {
                     instructions         = contact.instructions,
                 )
 
-                when (message.channel) {
-                    Message.Channel.NOTIFICATION -> {
-                        val sent = NotificationReplyRouter.sendReply(message.id, reply)
-                        if (!sent) {
-                            Log.w(TAG, "Inline reply failed for ${message.sender}")
-                            notify("Could not send reply to ${contact.name ?: message.sender} — notification was dismissed")
-                        }
-                    }
-                    Message.Channel.EMAIL, Message.Channel.GVOICE -> {
-                        EmailRouter.routeReply(message.sender, reply)
-                    }
-                    else -> Log.w(TAG, "Unknown channel ${message.channel} — cannot reply")
+                val channelLabel = when (message.channel) {
+                    Message.Channel.EMAIL, Message.Channel.GVOICE -> "email"
+                    else -> "sms"
                 }
+                val pd = ActionPolicyEngine.evaluatePublicReply(message.sender, channelLabel, draft)
 
-                val sender = contact.name ?: message.sender
-                notify("Auto-replied to $sender:\nThey: \"${message.body.take(60)}\"\nSent: \"${reply.take(80)}\"")
+                if (!pd.allowed) {
+                    val sender = contact.name ?: message.sender
+                    Log.w(TAG, "Auto-reply to $sender BLOCKED: ${pd.reason}")
+                    notify("Auto-reply to $sender suppressed by policy (${pd.reason}).\nDraft: \"${draft.take(80)}\"")
+                } else {
+                    when (message.channel) {
+                        Message.Channel.NOTIFICATION -> {
+                            val sent = NotificationReplyRouter.sendReply(message.id, draft)
+                            if (!sent) {
+                                Log.w(TAG, "Inline reply failed for ${message.sender}")
+                                notify("Could not send reply to ${contact.name ?: message.sender} — notification was dismissed")
+                            }
+                        }
+                        Message.Channel.EMAIL, Message.Channel.GVOICE -> {
+                            EmailRouter.routeReply(message.sender, draft)
+                        }
+                        else -> Log.w(TAG, "Unknown channel ${message.channel} — cannot reply")
+                    }
+
+                    val sender = contact.name ?: message.sender
+                    notify("Auto-replied to $sender:\nThey: \"${message.body.take(60)}\"\nSent: \"${draft.take(80)}\"")
+                }
             } else {
                 val sender = contact.name ?: message.sender
                 notify("New message from $sender:\n\"${message.body.take(100)}\"\n\nSay \"always reply to $sender\" to auto-reply")

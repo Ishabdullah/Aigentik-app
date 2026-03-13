@@ -2,6 +2,7 @@ package com.aigentik.app.benchmark
 
 import android.content.Context
 import android.util.Log
+import com.aigentik.app.agent.ActionPolicyEngine
 import com.aigentik.app.ai.AgentLLMFacade
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -111,6 +112,13 @@ class BenchmarkRunner(
         val ramAfter = readRssKb()
         val batteryAfter = BatteryStatsCollector.getBatteryPercent(context)
 
+        // Evaluate through ActionPolicyEngine (same path as live pipeline)
+        val pd = ActionPolicyEngine.evaluatePublicReply(
+            toPhone  = "benchmark",
+            channel  = task.taskType,
+            draft    = output,
+        )
+
         val inferenceMs = tracer.inferenceLatencyMs().coerceAtLeast(1L)
         val tps = if (tokenCount > 0) tokenCount.toFloat() / (inferenceMs / 1000f) else 0f
 
@@ -130,9 +138,9 @@ class BenchmarkRunner(
             batteryPercentBefore = batteryBefore,
             batteryPercentAfter  = batteryAfter,
             thermalStatus        = thermalStatus,
-            confidenceScore      = 1.0f,    // placeholder — RiskScorer not yet wired
-            policyDecision       = ExperimentConfig.POLICY_ALLOW,
-            actionExecuted       = output.isNotBlank(),
+            confidenceScore      = pd.confidence,
+            policyDecision       = pd.decisionLabel(),
+            actionExecuted       = output.isNotBlank() && pd.allowed,
             outputQualityScore   = null,    // requires human eval or reference scoring
             oomKill              = false,
             errorCode            = null,
