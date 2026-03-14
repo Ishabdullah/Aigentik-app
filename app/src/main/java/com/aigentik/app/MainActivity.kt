@@ -25,7 +25,9 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import com.aigentik.app.core.AigentikService
+import com.aigentik.app.core.AigentikSettings
 import com.aigentik.app.llm.ModelsRepository
+import com.aigentik.app.ui.screens.agent_settings.AgentSettingsActivity
 import com.aigentik.app.ui.screens.chat.ChatActivity
 import com.aigentik.app.ui.screens.model_download.DownloadModelActivity
 import kotlinx.coroutines.runBlocking
@@ -48,6 +50,10 @@ class MainActivity : ComponentActivity() {
         startForegroundService(Intent(this, AigentikService::class.java))
         Log.i(TAG, "AigentikService start requested")
 
+        // Ensure settings are readable before checking isConfigured.
+        // AigentikService also calls init() but runs asynchronously after startForegroundService().
+        AigentikSettings.init(this)
+
         // Request battery optimization exemption — lets the service and notification
         // listener stay alive without Samsung's aggressive background killing.
         // User sees a system dialog; we don't force it, just request once.
@@ -67,6 +73,12 @@ class MainActivity : ComponentActivity() {
         val models = runBlocking { modelsRepository.getAvailableModelsList() }
         if (models.isEmpty()) {
             Intent(this, DownloadModelActivity::class.java).apply {
+                startActivity(this)
+                finish()
+            }
+        } else if (!AigentikSettings.isConfigured) {
+            // First run: send user to settings to configure name, phone number, and channels.
+            Intent(this, AgentSettingsActivity::class.java).apply {
                 startActivity(this)
                 finish()
             }

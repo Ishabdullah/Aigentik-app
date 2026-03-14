@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -34,8 +35,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -46,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
@@ -56,6 +60,7 @@ import compose.icons.feathericons.ArrowLeft
 import com.aigentik.app.ai.AgentLLMFacade
 import com.aigentik.app.auth.GoogleAuthManager
 import com.aigentik.app.benchmark.BenchmarkRunner
+import com.aigentik.app.benchmark.CorpusBuilder
 import com.aigentik.app.benchmark.ExperimentConfig
 import com.aigentik.app.benchmark.MetricsExporter
 import com.aigentik.app.core.AgentNotificationManager
@@ -65,8 +70,11 @@ import com.aigentik.app.core.ContactEngine
 import com.aigentik.app.data.AppDB
 import com.aigentik.app.email.GmailHistoryClient
 import com.aigentik.app.ui.theme.SmolLMAndroidTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
+import org.koin.androidx.viewmodel.ext.android.viewModel as koinViewModel
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -94,6 +102,7 @@ class AgentSettingsActivity : ComponentActivity() {
     }
 
     private val appDB: AppDB by inject()
+    private val settingsViewModel: AgentSettingsViewModel by koinViewModel()
 
     // State that increments on resume/auth events to force UI recomposition
     private var refreshTrigger by mutableStateOf(0)
@@ -104,6 +113,10 @@ class AgentSettingsActivity : ComponentActivity() {
     private var benchmarkTotal by mutableIntStateOf(0)
     private var benchmarkResultText by mutableStateOf("")
     private var benchmarkLastExportPath by mutableStateOf("")
+
+    // Corpus state
+    private var corpusGenerating by mutableStateOf(false)
+    private var corpusTaskCount by mutableIntStateOf(-1)   // -1 = not checked yet
 
     // Google Sign-In launcher
     private val signInLauncher = registerForActivityResult(
@@ -178,11 +191,13 @@ class AgentSettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        refreshCorpusStatus()
         setContent {
             SmolLMAndroidTheme {
                 AgentSettingsScreen(
-                    refreshTrigger = refreshTrigger,
-                    onSignInClick = {
+                    viewModel       = settingsViewModel,
+                    refreshTrigger  = refreshTrigger,
+                    onSignInClick   = {
                         signInLauncher.launch(
                             GoogleAuthManager.buildSignInClient(this).signInIntent
                         )
@@ -190,30 +205,33 @@ class AgentSettingsActivity : ComponentActivity() {
                     onGrantGmailClick = {
                         val pending = GoogleAuthManager.pendingScopeIntent
                         if (pending != null) {
-                            // Already have the consent intent — launch it directly
                             scopeConsentLauncher.launch(pending)
                         } else {
-                            // No stored intent yet — call getFreshToken() which will
-                            // throw UserRecoverableAuthException → scopeResolutionListener fires
                             lifecycleScope.launch {
                                 GoogleAuthManager.getFreshToken(applicationContext)
                                 refreshTrigger++
                             }
                         }
                     },
-                    onSignOutClick = {
-                        GoogleAuthManager.signOut(this) { refreshTrigger++ }
+                    onSignOutClick  = {
+                        // Sign-out confirmation is shown inside the composable (L-3)
+                        settingsViewModel.onSignOut(this)
+                        refreshTrigger++
                     },
-                    onBackClick   = { finish() },
+                    onBackClick     = { finish() },
                     benchmarkRunning    = benchmarkRunning,
                     benchmarkProgress   = benchmarkProgress,
                     benchmarkTotal      = benchmarkTotal,
                     benchmarkResultText = benchmarkResultText,
                     benchmarkExportPath = benchmarkLastExportPath,
-                    onRunBenchmark = { corpusPath, experimentId ->
+                    onRunBenchmark  = { corpusPath, experimentId ->
                         runBenchmark(corpusPath, experimentId)
                     },
-                    onShareResults = { shareBenchmarkResults(it) },
+                    onShareResults  = { shareBenchmarkResults(it) },
+                    corpusGenerating    = corpusGenerating,
+                    corpusTaskCount     = corpusTaskCount,
+                    defaultCorpusPath   = CorpusBuilder.getDefaultCorpusFile(applicationContext).absolutePath,
+                    onGenerateCorpus    = { onPathReady -> generateCorpus(onPathReady) },
                 )
             }
         }
@@ -264,6 +282,42 @@ class AgentSettingsActivity : ComponentActivity() {
         }
     }
 
+    private fun refreshCorpusStatus() {
+        // File I/O on IO thread — avoids blocking main thread on cold launch
+        lifecycleScope.launch {
+            val count = withContext(Dispatchers.IO) {
+                val file = CorpusBuilder.getDefaultCorpusFile(applicationContext)
+                if (file.exists() && file.length() > 1024L)
+                    file.bufferedReader().lineSequence()
+                        .count { it.isNotBlank() && !it.startsWith("//") }
+                else -1
+            }
+            corpusTaskCount = count
+        }
+    }
+
+    private fun generateCorpus(onPathReady: (String) -> Unit) {
+        if (corpusGenerating) return
+        corpusGenerating = true
+        lifecycleScope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    CorpusBuilder.generate(applicationContext)
+                }
+                val count = withContext(Dispatchers.IO) {
+                    file.bufferedReader().lineSequence()
+                        .count { it.isNotBlank() && !it.startsWith("//") }
+                }
+                corpusTaskCount = count
+                onPathReady(file.absolutePath)
+            } catch (e: Exception) {
+                Log.e(TAG, "Corpus generation failed: ${e.message}")
+            } finally {
+                corpusGenerating = false
+            }
+        }
+    }
+
     private fun shareBenchmarkResults(path: String) {
         try {
             val csv = File(File(path), "metrics.csv")
@@ -287,6 +341,7 @@ class AgentSettingsActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AgentSettingsScreen(
+    viewModel: AgentSettingsViewModel,
     refreshTrigger: Int,
     onSignInClick: () -> Unit,
     onGrantGmailClick: () -> Unit,
@@ -299,41 +354,31 @@ private fun AgentSettingsScreen(
     benchmarkExportPath: String = "",
     onRunBenchmark: (corpusPath: String, experimentId: String) -> Unit = { _, _ -> },
     onShareResults: (path: String) -> Unit = {},
+    corpusGenerating: Boolean = false,
+    corpusTaskCount: Int = -1,
+    defaultCorpusPath: String = "",
+    onGenerateCorpus: ((String) -> Unit) -> Unit = {},
 ) {
-    // Auth state — re-read on every refreshTrigger change
-    val isSignedIn by remember(refreshTrigger) {
-        mutableStateOf(GoogleAuthManager.gmailScopesGranted.let {
-            // isSignedIn can't use context here, use gmailScopesGranted as proxy
-            true  // placeholder — set below
-        })
-    }
-    // Read directly from GoogleAuthManager (in-memory, safe on main thread)
+    // ViewModel state — auth and channel toggles re-read on refreshTrigger
+    val uiState by viewModel.uiState.collectAsState()
+
+    // Re-load from settings when resumed (refreshTrigger bumps on onResume)
+    remember(refreshTrigger) { viewModel.load() }
+
+    // Auth state directly from GoogleAuthManager (in-memory, safe on main thread)
     val gmailGranted = GoogleAuthManager.gmailScopesGranted
     val hasPendingScope = GoogleAuthManager.hasPendingScopeResolution()
     val lastTokenError = GoogleAuthManager.lastTokenError
 
+    // Sign-out confirmation dialog state (L-3)
+    var showSignOutDialog by remember { mutableStateOf(false) }
+
     // Benchmark local fields
-    var corpusPath by rememberSaveable { mutableStateOf("") }
+    var corpusPath by rememberSaveable { mutableStateOf(defaultCorpusPath) }
     val defaultExpId = remember {
-        "exp_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+        "exp_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     }
     var experimentId by rememberSaveable { mutableStateOf(defaultExpId) }
-
-    // Settings fields — auto-save to SharedPreferences on change
-    var agentName by rememberSaveable(refreshTrigger) { mutableStateOf(AigentikSettings.agentName) }
-    var ownerName by rememberSaveable(refreshTrigger) { mutableStateOf(AigentikSettings.ownerName) }
-    var adminNumber by rememberSaveable(refreshTrigger) { mutableStateOf(AigentikSettings.adminNumber) }
-
-    // Channel toggles — re-read on refreshTrigger
-    var smsEnabled by remember(refreshTrigger) {
-        mutableStateOf(ChannelManager.isEnabled(ChannelManager.Channel.SMS))
-    }
-    var emailEnabled by remember(refreshTrigger) {
-        mutableStateOf(ChannelManager.isEnabled(ChannelManager.Channel.EMAIL))
-    }
-    var gvoiceEnabled by remember(refreshTrigger) {
-        mutableStateOf(ChannelManager.isEnabled(ChannelManager.Channel.GVOICE))
-    }
 
     // Status (read once per composition)
     val aiStatus = AgentLLMFacade.getStateLabel()
@@ -343,6 +388,24 @@ private fun AgentSettingsScreen(
         hasPendingScope  -> "Needs permissions"
         lastTokenError != null -> "Error: ${lastTokenError.take(40)}"
         else             -> "Not signed in"
+    }
+
+    // Sign-out confirmation dialog
+    if (showSignOutDialog) {
+        AlertDialog(
+            onDismissRequest = { showSignOutDialog = false },
+            title   = { Text("Sign Out?") },
+            text    = { Text("This will disable Gmail and Google Voice auto-reply until you sign in again.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSignOutDialog = false
+                    onSignOutClick()
+                }) { Text("Sign Out", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSignOutDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 
     Scaffold(
@@ -386,7 +449,7 @@ private fun AgentSettingsScreen(
                         )
                         Spacer(Modifier.height(12.dp))
                         OutlinedButton(
-                            onClick = onSignOutClick,
+                            onClick = { showSignOutDialog = true },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error
@@ -422,7 +485,7 @@ private fun AgentSettingsScreen(
                         }
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(
-                            onClick = onSignOutClick,
+                            onClick = { showSignOutDialog = true },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error
@@ -459,45 +522,84 @@ private fun AgentSettingsScreen(
             item {
                 SectionCard(title = "Agent Configuration") {
                     Text(
-                        "Changes take effect on next service restart.",
+                        "Tap Save to apply changes. Service restart required for name/number changes.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
-                        value = agentName,
-                        onValueChange = {
-                            agentName = it
-                            AigentikSettings.agentName = it
-                        },
+                        value = uiState.agentName,
+                        onValueChange = { viewModel.update { copy(agentName = it) } },
                         label = { Text("Agent Name") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
-                        value = ownerName,
-                        onValueChange = {
-                            ownerName = it
-                            AigentikSettings.ownerName = it
-                        },
+                        value = uiState.ownerName,
+                        onValueChange = { viewModel.update { copy(ownerName = it) } },
                         label = { Text("Your Name") },
+                        isError = uiState.ownerName.isBlank(),
+                        supportingText = if (uiState.ownerName.isBlank()) {
+                            { Text("Required", color = MaterialTheme.colorScheme.error) }
+                        } else null,
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
-                        value = adminNumber,
-                        onValueChange = {
-                            adminNumber = it
-                            AigentikSettings.adminNumber = it
-                        },
+                        value = uiState.adminNumber,
+                        onValueChange = { viewModel.update { copy(adminNumber = it) } },
                         label = { Text("Your Phone Number") },
                         supportingText = { Text("Messages from this number are treated as admin commands") },
+                        isError = uiState.adminNumber.isBlank(),
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = uiState.adminPassword,
+                        onValueChange = { viewModel.update { copy(adminPassword = it) } },
+                        label = { Text("Admin Password") },
+                        supportingText = { Text("Used for remote SMS admin commands (leave blank to keep existing)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    if (uiState.adminPassword.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = uiState.adminPasswordConfirm,
+                            onValueChange = { viewModel.update { copy(adminPasswordConfirm = it) } },
+                            label = { Text("Confirm Password") },
+                            isError = uiState.adminPassword != uiState.adminPasswordConfirm,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    // Show status/error message from ViewModel save()
+                    if (uiState.statusMessage.isNotBlank()) {
+                        Text(
+                            uiState.statusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (uiState.statusIsError)
+                                MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Button(
+                        onClick = { viewModel.save() },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = uiState.ownerName.isNotBlank() && uiState.adminNumber.isNotBlank(),
+                    ) {
+                        Text("Save Settings")
+                    }
                 }
             }
 
@@ -507,9 +609,9 @@ private fun AgentSettingsScreen(
                     ChannelRow(
                         label = "SMS / RCS",
                         description = "Auto-reply to text messages",
-                        enabled = smsEnabled,
+                        enabled = uiState.smsEnabled,
                         onToggle = {
-                            smsEnabled = it
+                            viewModel.update { copy(smsEnabled = it) }
                             if (it) ChannelManager.enable(ChannelManager.Channel.SMS)
                             else    ChannelManager.disable(ChannelManager.Channel.SMS)
                         }
@@ -518,9 +620,9 @@ private fun AgentSettingsScreen(
                     ChannelRow(
                         label = "Email",
                         description = "Auto-reply to Gmail messages",
-                        enabled = emailEnabled,
+                        enabled = uiState.emailEnabled,
                         onToggle = {
-                            emailEnabled = it
+                            viewModel.update { copy(emailEnabled = it) }
                             if (it) ChannelManager.enable(ChannelManager.Channel.EMAIL)
                             else    ChannelManager.disable(ChannelManager.Channel.EMAIL)
                         }
@@ -529,9 +631,9 @@ private fun AgentSettingsScreen(
                     ChannelRow(
                         label = "Google Voice",
                         description = "Auto-reply to GVoice texts via Gmail",
-                        enabled = gvoiceEnabled,
+                        enabled = uiState.gvoiceEnabled,
                         onToggle = {
-                            gvoiceEnabled = it
+                            viewModel.update { copy(gvoiceEnabled = it) }
                             if (it) ChannelManager.enable(ChannelManager.Channel.GVOICE)
                             else    ChannelManager.disable(ChannelManager.Channel.GVOICE)
                         }
@@ -558,11 +660,34 @@ private fun AgentSettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(12.dp))
+
+                    // Corpus status row
+                    val corpusStatus = when {
+                        corpusGenerating    -> "Generating…"
+                        corpusTaskCount < 0 -> "Not generated"
+                        else                -> "$corpusTaskCount tasks ready"
+                    }
+                    StatusRow("Corpus", corpusStatus)
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            onGenerateCorpus { path -> corpusPath = path }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !corpusGenerating && !benchmarkRunning,
+                    ) {
+                        Text(
+                            if (corpusGenerating) "Generating…"
+                            else if (corpusTaskCount >= 0) "Regenerate Corpus (500 tasks)"
+                            else "Generate Corpus (500 tasks)"
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = corpusPath,
                         onValueChange = { corpusPath = it },
                         label = { Text("Corpus file path") },
-                        placeholder = { Text("/sdcard/Download/corpus.jsonl") },
+                        placeholder = { Text(defaultCorpusPath.ifBlank { "/sdcard/Download/corpus.jsonl" }) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         enabled = !benchmarkRunning,
