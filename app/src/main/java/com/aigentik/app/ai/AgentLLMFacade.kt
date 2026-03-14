@@ -36,7 +36,7 @@ import kotlin.concurrent.withLock
 object AgentLLMFacade {
 
     private const val TAG = "AgentLLMFacade"
-    private const val IDLE_UNLOAD_DELAY_MS = 60_000L // 1 minute
+    private const val IDLE_UNLOAD_DELAY_MS = 300_000L // 5 minutes — keeps model loaded across conversational reply bursts
 
     private val smolLM = SmolLM()
 
@@ -111,13 +111,20 @@ object AgentLLMFacade {
     fun unloadModel() {
         if (state == State.NOT_LOADED) return
         try {
-            lock.withLock { smolLM.close() }
+            lock.withLock {
+                // Set state INSIDE the lock so concurrent generation callers
+                // see NOT_LOADED before they call smolLM.getResponse() on a
+                // closed native handle. Without this, there is a window between
+                // smolLM.close() completing and state = NOT_LOADED where a waiter
+                // would see state==READY and call into a closed JNI context.
+                smolLM.close()
+                state = State.NOT_LOADED
+            }
+            idleUnloadJob = null
             Log.i(TAG, "AgentLLMFacade: model unloaded (RAM freed)")
         } catch (e: Exception) {
             Log.w(TAG, "unloadModel: ${e.message}")
-        } finally {
-            state = State.NOT_LOADED
-            idleUnloadJob = null
+            state = State.NOT_LOADED // ensure clean state even on close() failure
         }
     }
 

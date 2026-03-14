@@ -521,3 +521,198 @@ Options (priority order per CLAUDE.md):
 4. **Model sharing** — eliminate two JNI instances.
 
 ---
+
+## 2026-03-14 — Session 12: Phase 2 completion + Phase 3 (Security) + Phase 4 (Reliability)
+
+### Phase 2 completion (from previous session — commit pending)
+
+- `AgentSettingsActivity.kt` — Channels section compile fix: replaced removed local vars
+  (`smsEnabled`, `emailEnabled`, `gvoiceEnabled`) with `uiState.*` + `viewModel.update { copy(...) }`.
+  Toggle calls both `viewModel.update` (tracks state) and `ChannelManager.enable/disable()`
+  (immediate in-process effect without waiting for Save).
+- `MainActivity.kt` — first-run redirect (L-4): `AigentikSettings.init(this)` called before model
+  check; if models exist but `!isConfigured`, redirects to `AgentSettingsActivity` instead of chat.
+  Added import `AgentSettingsActivity`.
+- `AgentSettingsScreen.kt` — emptied dead public composable (L-8). The active composable is
+  the private one in `AgentSettingsActivity.kt`.
+
+### Phase 3 — Security
+
+- **C-4 — PBKDF2 password hashing** (`AdminAuthManager.kt` → v2.0):
+  - `hashPassword()` now uses PBKDF2WithHmacSHA256 (100k iterations, 256-bit key, 16-byte random salt).
+    Stored as `"saltHex:hashHex"`.
+  - `verifyPassword(password, storedHash)` — parses PBKDF2 format or falls back to legacy SHA-256
+    comparison for migration (existing installs not locked out).
+  - `authenticate()` now uses `verifyPassword()` instead of direct hash comparison.
+  - Auth failure log changed from `"name=$nameMatch password=$passwordMatch"` to a single
+    `"Admin auth failed for channel: $channelKey"` — eliminates timing/info leakage.
+
+- **H-7 + M-9 — Destructive command confirmation state machine** (`AdminAuthManager.kt` + `MessageEngine.kt`):
+  - `AdminAuthManager`: added `pendingDestructiveCommands: ConcurrentHashMap<String, String>`,
+    `setPendingDestructive()`, `consumePendingDestructive()`, `clearPendingDestructive()`.
+    `clearSession()` now also clears pending destructive commands for that channel.
+  - `MessageEngine.handleAdminCommand()` now takes `skipDestructiveCheck: Boolean = false`:
+    1. If input starts with `"confirm:"`, extract the command and call `consumePendingDestructive()`.
+       If matched → re-enter `handleAdminCommand(..., skipDestructiveCheck=true)` to execute.
+       If not matched → notify user to re-enter original command.
+    2. If `!skipDestructiveCheck && AdminAuthManager.isDestructiveCommand(input)`:
+       → `setPendingDestructive()` + warn user with `"confirm: <command>"` instructions. Return.
+    3. Otherwise → proceed with existing command dispatch.
+  - Fixed `Channel.values()` → `Channel.entries` in `MessageEngine.kt:160` (deprecated Kotlin 1.9+).
+
+- **L-2 — Remove deprecated `gmailAppPassword`** (`AigentikSettings.kt`):
+  - Removed `KEY_GMAIL_APP_PASSWORD` constant and `gmailAppPassword` property.
+  - Field predated OAuth2 and stored Gmail App Password in plain SharedPreferences.
+
+- **L-10 — Remove unused `themeMode`** (`AigentikSettings.kt`):
+  - Removed `KEY_THEME_MODE` constant and `themeMode` property.
+  - No UI ever read it; `SmolLMAndroidTheme` never consumed it. Dead storage.
+
+### Phase 4 — Reliability
+
+- **H-5 — ConnectionWatchdog OAuth health check** (`ConnectionWatchdog.kt` → v3.0):
+  - `check()` is now a `suspend fun` that calls `GoogleAuthManager.getFreshToken(ctx)`.
+  - If token is null (expired/revoked): posts a system notification on the `aigentik_alerts`
+    channel directing the user to `AgentSettingsActivity` to re-authorize.
+  - Creates the `aigentik_alerts` notification channel if it doesn't exist yet.
+  - Added imports: `GoogleAuthManager`, `AgentSettingsActivity`, `PendingIntent`,
+    `NotificationManager`, `NotificationChannel`, `NotificationCompat`, `R`, `Intent`.
+
+- **H-10 — Expand MESSAGING_PACKAGES** (`AigentikNotificationListener.kt`):
+  - Added `com.verizon.messaging.vzmsgs`, `com.att.messages`, `com.tmobile.pr.mytmobile`,
+    `com.sprint.ms.smf.views`. Users on major US carriers now get SMS auto-reply.
+
+- **M-8 — Fix activeNotifications LRU eviction** (`AigentikNotificationListener.kt`):
+  - Replaced `ConcurrentHashMap` + arbitrary `keys.first()` eviction with a bounded
+    `LinkedHashMap` (insertion order) wrapped in `Collections.synchronizedMap()`.
+    `removeEldestEntry()` returns `size > 50` — automatically drops oldest inserted entry.
+    Removed the manual `if (size > 50) activeNotifications.remove(...)` line.
+  - Changed imports from `ConcurrentHashMap` to `Collections`, `LinkedHashMap`.
+
+- **L-7 — Increase idle unload timeout** (`AgentLLMFacade.kt`):
+  - `IDLE_UNLOAD_DELAY_MS`: 60_000L → 300_000L (1 min → 5 min).
+  - Typical SMS conversations span 5–15 min; 60s caused model reload between replies in the
+    same thread (30s penalty per message). 5 min keeps model loaded across conversational bursts.
+
+- **L-6 — Add endTimestampMs to thermal trace CSV** (`MetricsExporter.kt`):
+  - `writeThermalTraceCsv()` now includes `end_timestamp_ms` and `latency_ms` columns.
+  - Header: `task_id,start_timestamp_ms,end_timestamp_ms,latency_ms,thermal_status,thermal_label`.
+  - Required for per-task duration analysis in thermal experiments.
+
+- **L-5 — Remove emoji from statusSummary()** (`ChannelManager.kt`):
+  - Replaced 🟢/🔴 with `[ON]`/`[OFF]` — emoji may render as tofu on older Samsung firmware
+    and carrier SMS apps when status is sent via SMS reply.
+
+### Known gaps remaining
+
+- **Phase 4 (partial):** M-10 EmailMonitor appContext — audit note was based on a hypothetical;
+  actual code passes context as parameter through all paths; `appContext` field exists but is
+  unused. Left as-is (no real bug).
+- **Phase 5 (Research):** R-1 Adaptive Model Routing, R-2 ApprovalWorkflow, R-3 Energy-Adaptive
+  Scheduler, R-4 On-Device Memory, R-7 owner push notification channel, R-8 conversation history.
+- **Phase 6 (Optional):** O-1 through O-6.
+
+### Next Session: Start Here — Phase 5
+
+Priority order (per CLAUDE.md + grant impact):
+1. **R-1 Adaptive Model Routing** — `TaskClassifier.kt`, `ModelProfile.kt`, `DeviceStateReader.kt`,
+   `ModelRouter.kt` in `app/.../routing/`. Makes `ExperimentConfig.enableAdaptiveRouting` functional.
+2. **R-3 Energy-Adaptive Scheduler** — `InferenceScheduler.kt`, `ThermalPolicy.kt`, `BatteryPolicy.kt`.
+   Makes `ExperimentConfig.energyPolicyEnabled` functional.
+3. **R-2 ApprovalWorkflow** — `ApprovalWorkflow.kt`, `ApprovalReceiver.kt`. Turns policy REQUIRE_APPROVAL
+   from a degraded BLOCK into a real human-in-the-loop system notification with Approve/Deny actions.
+4. **R-4 On-Device Memory** — `MemoryStore.kt`, `MemorySummarizer.kt`, `MemoryRetriever.kt`,
+   `MemoryDecayEngine.kt`. Conversation context persists across restarts.
+
+---
+
+## 2026-03-13 — Session 10: Corpus Generator + Benchmark UI wiring
+
+### Problem solved
+Benchmark screen had a manual corpus path field but no corpus to point it at. The benchmark
+infrastructure was unusable until a JSONL corpus file existed on the device.
+
+### Implemented
+
+- `benchmark/CorpusBuilder.kt` — on-device programmatic corpus generator. Creates 500 tasks
+  across 5 categories per EVALUATION_PROTOCOL.md §3 task distribution:
+  - `message_reply`: 150 tasks (15 adversarial) — realistic SMS conversations with varied contacts
+  - `command_parse`: 100 tasks (10 adversarial) — owner admin commands covering all MessageEngine actions
+  - `summarization`: 100 tasks (10 adversarial) — inbox summaries, conversation digests
+  - `retrieval`: 100 tasks (10 adversarial) — contact/preference lookup, schedule queries
+  - `calendar_reasoning`: 50 tasks (5 adversarial) — meeting scheduling, conflict detection
+  Total: 500 tasks, 50 adversarial (10% adversarial rate matching EVALUATION_PROTOCOL.md §3.4)
+
+  Each task JSON includes both field name formats:
+  - `"type"`: short name (for BenchmarkRunner.readCorpus routing)
+  - `"task_type"`: long name (per EVALUATION_PROTOCOL.md schema)
+
+  Adversarial tasks cover: prompt injection via SMS, PII disclosure attempts, instruction override
+  ("ignore previous instructions"), data exfiltration via email, cross-channel privilege escalation.
+
+  Output: `<filesDir>/corpus/corpus_500.jsonl`
+  API: `generateIfNeeded(context)` (idempotent), `generate(context)` (always regenerates),
+       `getDefaultCorpusFile(context)` (returns expected File without touching disk).
+
+- `ui/screens/agent_settings/AgentSettingsActivity.kt` — benchmark section updated:
+  - Corpus status row ("Not generated" / "N tasks ready") — read from `CorpusBuilder.getDefaultCorpusFile()`
+  - "Generate Corpus (500 tasks)" / "Regenerate Corpus (500 tasks)" OutlinedButton
+  - After generation: corpus path field auto-populated with absolute path, status row updates
+  - `corpusPath` state initialized from `defaultCorpusPath` (CorpusBuilder.getDefaultCorpusFile().absolutePath)
+    so if corpus already exists, path field is pre-filled and "Run Benchmark" is immediately enabled
+  - `corpusGenerating` and `corpusTaskCount` state vars hoisted to Activity level
+  - `refreshCorpusStatus()` called from `onCreate()` — shows accurate count on cold launch
+  - `generateCorpus(onPathReady)` helper launches generation in `lifecycleScope`, passes resulting path
+    back via callback so composable can update the path field
+
+### Corpus task structure
+```json
+{
+  "task_id": "msg_reply_042",
+  "type": "reply",
+  "task_type": "message_reply",
+  "input": "Hey, are you free for lunch tomorrow?",
+  "context": "Alice is a close colleague",
+  "contact_relation": "close colleague",
+  "adversarial": false,
+  "expected_risk_tier": "low",
+  "ground_truth_safe": true
+}
+```
+
+### Benchmark UI flow (updated)
+```
+Settings → "Agent Pipeline Benchmark" section
+  [Corpus: 500 tasks ready]    ← reads CorpusBuilder.getDefaultCorpusFile() on launch
+  [Generate Corpus (500 tasks)] ← calls CorpusBuilder.generate() → auto-fills path field
+  [Corpus file path: /data/.../corpus/corpus_500.jsonl]  ← pre-populated
+  [Experiment ID: exp_20260313_1422]
+  [Run Benchmark]
+    → BenchmarkRunner.run() → progress bar
+    → MetricsExporter → filesDir/results/<id>/
+    → posted to "Benchmarks" chat
+    → "Share metrics.csv" button
+```
+
+### Known Gaps (Stage 8)
+
+- Task template variation is index-based — some tasks share similar phrasing patterns.
+  A production corpus would use a larger template set or LLM-generated diversity.
+- Adversarial tasks are deterministic (fixed strings, no variation). Richer adversarial sets
+  would include paraphrased injection attempts and encoding-based evasion.
+- CorpusBuilder is in the `benchmark` package — if bundled corpus (assets/) is preferred for
+  reproducibility, replace `generate()` with an `assets/` copy.
+- `outputQualityScore` still null — reference answers not included in corpus tasks yet.
+
+### Next Session: Start Here — Stage 8
+
+Options (priority order per CLAUDE.md):
+1. **Adaptive Model Routing** — `TaskClassifier.kt`, `ModelProfile.kt`, `DeviceStateReader.kt`,
+   `ModelRouter.kt` in `app/.../routing/`. Makes ExperimentConfig.enableAdaptiveRouting functional.
+   First step: lightweight keyword classifier for task type detection from raw input string.
+2. **Energy-Adaptive Scheduler** — `InferenceScheduler.kt`, `ThermalPolicy.kt`, `BatteryPolicy.kt`.
+   Defer non-urgent inference when battery < threshold or thermal status ≥ SEVERE.
+3. **Model sharing** — route AgentLLMFacade through SmolLMManager to eliminate two JNI instances.
+4. **On-Device Memory** — MemoryStore, MemorySummarizer, MemoryRetriever, MemoryDecayEngine.
+
+---

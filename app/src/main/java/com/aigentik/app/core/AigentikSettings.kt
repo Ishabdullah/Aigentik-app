@@ -15,7 +15,6 @@ object AigentikSettings {
     private const val KEY_ADMIN_NUMBER      = "admin_number"
     private const val KEY_AIGENTIK_NUMBER   = "aigentik_number"
     private const val KEY_GMAIL_ADDRESS     = "gmail_address"
-    private const val KEY_GMAIL_APP_PASSWORD = "gmail_app_password"
     private const val KEY_AUTO_REPLY        = "auto_reply_default"
     private const val KEY_PAUSED            = "paused"
     private const val KEY_MODEL_PATH        = "model_path"
@@ -23,7 +22,6 @@ object AigentikSettings {
     private const val KEY_ADMIN_PASS_HASH   = "admin_password_hash"
     private const val KEY_ADMIN_USERNAME    = "admin_username"
     private const val KEY_OAUTH_SIGNED_IN        = "oauth_signed_in"
-    private const val KEY_THEME_MODE             = "theme_mode"
     private const val KEY_AGENT_NOTIF_FOLDER_ID  = "agent_notif_folder_id"
     private const val KEY_AGENT_NOTIF_CHAT_ID    = "agent_notif_chat_id"
     private const val KEY_BENCHMARK_CHAT_ID      = "benchmark_chat_id"
@@ -66,18 +64,9 @@ object AigentikSettings {
         get() = prefs.getBoolean(KEY_OAUTH_SIGNED_IN, false)
         set(value) = prefs.edit().putBoolean(KEY_OAUTH_SIGNED_IN, value).apply()
 
-    var themeMode: Int
-        get() = prefs.getInt(KEY_THEME_MODE, 0)
-        set(value) = prefs.edit().putInt(KEY_THEME_MODE, value).apply()
-
     var gmailAddress: String
         get() = prefs.getString(KEY_GMAIL_ADDRESS, "") ?: ""
         set(value) = prefs.edit().putString(KEY_GMAIL_ADDRESS, value).apply()
-
-    @Deprecated("Use OAuth2 via GoogleAuthManager instead")
-    var gmailAppPassword: String
-        get() = prefs.getString(KEY_GMAIL_APP_PASSWORD, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_GMAIL_APP_PASSWORD, value.replace(" ", "").trim()).apply()
 
     var autoReplyDefault: Boolean
         get() = prefs.getBoolean(KEY_AUTO_REPLY, true)

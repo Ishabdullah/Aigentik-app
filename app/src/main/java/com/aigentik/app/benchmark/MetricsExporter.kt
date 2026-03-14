@@ -171,9 +171,10 @@ object MetricsExporter {
 
     private fun writeThermalTraceCsv(dir: File, metrics: List<TaskMetric>) {
         val sb = StringBuilder()
-        sb.appendLine("task_id,start_timestamp_ms,thermal_status,thermal_label")
+        sb.appendLine("task_id,start_timestamp_ms,end_timestamp_ms,latency_ms,thermal_status,thermal_label")
         for (m in metrics) {
-            sb.appendLine("${m.taskId.csvEscape()},${m.startTimestampMs},${m.thermalStatus},${statusLabel(m.thermalStatus)}")
+            sb.appendLine("${m.taskId.csvEscape()},${m.startTimestampMs},${m.endTimestampMs}," +
+                          "${m.latencyMs},${m.thermalStatus},${statusLabel(m.thermalStatus)}")
         }
         File(dir, "thermal_trace.csv").writeText(sb.toString())
     }

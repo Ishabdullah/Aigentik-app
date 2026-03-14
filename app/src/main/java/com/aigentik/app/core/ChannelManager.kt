@@ -32,15 +32,15 @@ object ChannelManager {
     }
 
     fun loadFromSettings() {
-        Channel.values().forEach { ch ->
+        Channel.entries.forEach { ch ->
             channelState[ch] = AigentikSettings.getChannelEnabled(ch.name, true)
         }
         Log.i(TAG, "Channel states: ${channelState.map { "${it.key}=${it.value}" }}")
     }
 
     fun statusSummary(): String =
-        Channel.values().joinToString("\n") { ch ->
-            val icon = if (isEnabled(ch)) "🟢" else "🔴"
+        Channel.entries.joinToString("\n") { ch ->
+            val icon = if (isEnabled(ch)) "[ON]" else "[OFF]"
             "$icon ${ch.name}: ${if (isEnabled(ch)) "active" else "paused"}"
         }
 

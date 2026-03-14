@@ -146,18 +146,53 @@ object MessageEngine {
 
     // ─── Admin command handler ────────────────────────────────────────────────
 
-    private suspend fun handleAdminCommand(message: Message) {
+    private suspend fun handleAdminCommand(
+        message: Message,
+        skipDestructiveCheck: Boolean = false,
+    ) {
         Log.i(TAG, "handleAdminCommand: channel=${message.channel} body='${message.body.take(80)}'")
 
-        val input = message.body.trim()
+        val rawInput   = message.body.trim()
+        val channelKey = message.sender
+
+        // ── Destructive command confirmation ──────────────────────────────────────
+        // "confirm: <original command>" resolves a pending destructive action.
+        if (rawInput.lowercase().startsWith("confirm:")) {
+            val toConfirm = rawInput.drop(8).trim()
+            val pending   = AdminAuthManager.consumePendingDestructive(channelKey, toConfirm)
+            if (pending != null) {
+                Log.i(TAG, "Destructive command confirmed — executing: ${pending.take(60)}")
+                // Re-enter with confirmed command; skipDestructiveCheck=true bypasses the guard
+                handleAdminCommand(message.copy(body = pending), skipDestructiveCheck = true)
+            } else {
+                notify("No pending destructive command matched. Re-enter the original command to re-arm.")
+                if (message.channel != Message.Channel.CHAT) {
+                    replyToSender(message, "No pending destructive command matched. Re-enter the original command to re-arm.")
+                }
+            }
+            return
+        }
+
+        val input = rawInput
         val lower = input.lowercase()
+
+        // ── Destructive command guard ─────────────────────────────────────────────
+        // All destructive commands require explicit confirmation before execution.
+        if (!skipDestructiveCheck && AdminAuthManager.isDestructiveCommand(input)) {
+            AdminAuthManager.setPendingDestructive(channelKey, input)
+            val warning = "Destructive command detected: \"${input.take(80)}\"\n" +
+                "Reply with 'confirm: $input' to proceed, or send any other command to cancel."
+            notify(warning)
+            if (message.channel != Message.Channel.CHAT) replyToSender(message, warning)
+            return
+        }
 
         // Channel toggle — instant, no LLM
         val channelToggle = ChannelManager.parseToggleCommand(lower)
         if (channelToggle != null) {
             val (channel, enable) = channelToggle
             if (lower.contains("all") || lower.contains("everything")) {
-                ChannelManager.Channel.values().forEach { ch ->
+                ChannelManager.Channel.entries.forEach { ch ->
                     if (enable) ChannelManager.enable(ch) else ChannelManager.disable(ch)
                 }
                 val verb = if (enable) "enabled" else "paused"
@@ -185,20 +220,14 @@ object MessageEngine {
                 Log.d(TAG, "handleAdminCommand: fast-path '${quickResult.action}' — LLM skipped")
                 quickResult
             } else {
-                // Genuine conversation — no command keywords, not a known command
-                Log.d(TAG, "handleAdminCommand: fast-path — genuine conversation")
-                if (AgentLLMFacade.isReady()) {
-                    val reply = AgentLLMFacade.generateChatReply(input)
-                    notify(reply)
-                    // If admin is chatting via SMS (not chat screen), reply back
-                    if (message.channel != Message.Channel.CHAT) {
-                        replyToSender(message, reply)
-                    }
-                } else {
-                    notify("Try: status, channels, find [name], or just ask me anything.")
-                    if (message.channel != Message.Channel.CHAT) {
-                        replyToSender(message, "Loading... try again in a moment.")
-                    }
+                // Genuine conversation — no command keywords, not a known command.
+                // generateChatReply calls ensureLoaded() internally, which waits for the
+                // model to finish loading rather than returning a "try again" hint.
+                Log.d(TAG, "handleAdminCommand: fast-path — genuine conversation → generateChatReply")
+                val reply = AgentLLMFacade.generateChatReply(input)
+                notify(reply)
+                if (message.channel != Message.Channel.CHAT) {
+                    replyToSender(message, reply)
                 }
                 return
             }
@@ -348,16 +377,13 @@ object MessageEngine {
                             notify("Email active. Say 'check email' to see unread, or 'send email to [address]'.")
 
                         else -> {
-                            // Genuine conversation that slipped past fast-path
-                            if (AgentLLMFacade.isReady()) {
-                                Log.d(TAG, "handleAdminCommand: fallback → generateChatReply")
-                                val reply = AgentLLMFacade.generateChatReply(input)
-                                notify(reply)
-                                if (message.channel != Message.Channel.CHAT) {
-                                    replyToSender(message, reply)
-                                }
-                            } else {
-                                notify("Try: status, channels, find [name], check email, or just ask me anything.")
+                            // Genuine conversation that slipped past fast-path.
+                            // generateChatReply calls ensureLoaded() — waits for model, no hint fallback.
+                            Log.d(TAG, "handleAdminCommand: fallback → generateChatReply")
+                            val reply = AgentLLMFacade.generateChatReply(input)
+                            notify(reply)
+                            if (message.channel != Message.Channel.CHAT) {
+                                replyToSender(message, reply)
                             }
                         }
                     }

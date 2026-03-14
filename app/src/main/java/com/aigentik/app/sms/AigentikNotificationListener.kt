@@ -11,7 +11,9 @@ import com.aigentik.app.core.MessageDeduplicator
 import com.aigentik.app.core.MessageEngine
 import com.aigentik.app.core.PhoneNormalizer
 import com.aigentik.app.email.EmailMonitor
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
+import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
 
 // NotificationAdapter v3.0 — Stage 2 complete
 // v3.0: Gmail notifications routed to EmailMonitor.onGmailNotification() (Stage 2)
@@ -27,8 +29,12 @@ class AigentikNotificationListener : NotificationListenerService() {
         private const val TAG = "AigentikNotifListener"
 
         private val MESSAGING_PACKAGES = setOf(
-            "com.google.android.apps.messaging",
-            "com.samsung.android.messaging",
+            "com.google.android.apps.messaging",    // Google Messages (Pixel + most Android)
+            "com.samsung.android.messaging",        // Samsung Messages
+            "com.verizon.messaging.vzmsgs",         // Verizon Messages
+            "com.att.messages",                     // AT&T Messages
+            "com.tmobile.pr.mytmobile",             // T-Mobile (some builds)
+            "com.sprint.ms.smf.views",              // Sprint/T-Mobile legacy
         )
         private const val GMAIL_PACKAGE  = "com.google.android.gm"
         private const val KEY_TITLE      = "android.title"
@@ -36,9 +42,18 @@ class AigentikNotificationListener : NotificationListenerService() {
         private const val KEY_BIG_TEXT   = "android.bigText"
     }
 
-    // ConcurrentHashMap: onNotificationPosted and onNotificationRemoved may run on
-    // different threads — plain LinkedHashMap caused ConcurrentModificationException.
-    private val activeNotifications = ConcurrentHashMap<String, StatusBarNotification>()
+    // Bounded insertion-order map capped at 50 entries.
+    // LinkedHashMap (insertion order) wrapped in synchronizedMap gives thread-safe LRU eviction:
+    // when size exceeds 50, removeEldestEntry() automatically drops the oldest inserted entry.
+    // ConcurrentLinkedDeque not needed: synchronizedMap wraps all single-entry operations.
+    private val activeNotifications: MutableMap<String, StatusBarNotification> =
+        Collections.synchronizedMap(
+            object : LinkedHashMap<String, StatusBarNotification>(64, 0.75f, false) {
+                override fun removeEldestEntry(
+                    eldest: MutableMap.MutableEntry<String, StatusBarNotification>?
+                ) = size > 50
+            }
+        )
 
     // Set context IMMEDIATELY when service binds — before any notification arrives.
     // NotificationReplyRouter.appContext must be non-null for PendingIntent.send() on Android 13+.
@@ -97,8 +112,7 @@ class AigentikNotificationListener : NotificationListenerService() {
 
         // ALWAYS register with NotificationReplyRouter — even if duplicate.
         // The inline reply path needs the notification registered to fire reply.
-        activeNotifications[dedupKey] = sbn
-        if (activeNotifications.size > 50) activeNotifications.remove(activeNotifications.keys.first())
+        activeNotifications[dedupKey] = sbn   // oldest entry auto-evicted at size > 50
         NotificationReplyRouter.register(dedupKey, sbn.notification, sbn.packageName, sbn.key)
 
         // Only send to engine if not already processed

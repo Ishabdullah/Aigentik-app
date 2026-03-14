@@ -29,33 +29,35 @@
 
 ## Features
 
-### 🤖 On-Device LLM Inference
-- Run GGUF format models locally on your Android device
-- No internet required for inference
-- Modify system prompts and inference parameters (temperature, min-p)
-- Create custom tasks with specific system prompts
+### On-Device LLM Inference
+- Runs GGUF models locally via llama.cpp — no cloud inference, no data leaves the device
+- On-demand load + 5-minute idle unload: model loads on first message, unloads after inactivity (frees RAM)
+- PBKDF2WithHmacSHA256 password hashing for remote admin auth (100k iterations, random salt)
 
-### 📧 Email Integration
-- Connect multiple email providers (Gmail, Outlook, IMAP/SMTP)
-- Read and draft AI-powered email responses
-- Send emails directly from the app
-- Manage labels and folders
-- Trash management (move to trash, empty trash)
-- Google Voice integration - respond to voicemails as SMS
+### Autonomous Agent Pipeline
+- **SMS/RCS auto-reply** — intercepts notifications from Google Messages, Samsung Messages, Verizon Messages, AT&T Messages, and other carrier SMS apps; replies via inline notification action
+- **Gmail auto-reply** — triggered by Gmail notifications; History API delta fetch; GVoice SMS via Gmail routing
+- **Action Policy Engine** — typed action schema, risk scoring, confidence gating; blocks unsafe actions before execution; every action gets an audit trail
+- **Destructive command confirmation** — admin commands containing delete/wipe/broadcast keywords require explicit "confirm: ..." reply before execution
+- **Admin auth** — SMS-based remote admin with 30-minute session management and PBKDF2-hashed password
 
-### 📅 Calendar Integration
-- Google Calendar and system calendar support
-- View, create, modify, and delete events
-- AI-powered scheduling suggestions
-- Find free time slots for meetings
-- Natural language event creation
+### Agent Safety
+- Policy engine sits between LLM output and action execution — no action executes without passing through it
+- Risk tiers: LOW (status queries), MEDIUM (auto-replies), HIGH (send email, unknown actions)
+- REQUIRE_APPROVAL path: medium-confidence public replies are flagged for owner review
+- OAuth health watchdog: re-auth notification posted if Gmail token expires while running in background
 
-### 💬 SMS/RCS Integration
-- Intercept notifications from Google Messages, Samsung Messages
-- AI-powered reply suggestions for incoming messages
-- Quick reply via notification action buttons
-- RCS support through notification reply interface
-- Direct SMS send/receive capability
+### Research Platform (NSF SBIR Phase I)
+- **Benchmark infrastructure** — `BenchmarkRunner` drives 500-task JSONL corpus; `MetricsExporter` produces `metrics.csv`, `summary.json`, `thermal_trace.csv` with latency/battery/thermal per task
+- **Evaluation protocol** — per EVALUATION_PROTOCOL.md: p50/p90/p99 latency, token throughput, RAM (before/peak/after), battery delta, thermal distribution, OOM tracking
+- **Corpus generator** — 500 tasks across 5 categories (message_reply, command_parse, summarization, retrieval, calendar_reasoning); 10% adversarial rate (prompt injection, PII probing, instruction override)
+- Benchmark UI in Settings — run experiments, track progress, share metrics.csv via FileProvider
+
+### Chat Interface
+- Jetpack Compose chat UI (from SmolChat-Android base)
+- GGUF model download from Hugging Face Hub
+- "Aigentik" folder auto-created in chat UI with Agent Activity and Benchmarks chats
+- All agent events (replies sent, policy blocks, errors) appear in "Agent Activity" chat
 
 ## Installation
 
@@ -112,10 +114,7 @@ Aigentik requires the following permissions for its features:
 - `WRITE_CALENDAR` - Create/modify calendar events
 
 ### SMS Permissions
-- `READ_SMS` - Read SMS messages
-- `SEND_SMS` - Send SMS messages
-- `RECEIVE_SMS` - Receive SMS messages
-- `BIND_NOTIFICATION_LISTENER_SERVICE` - Listen to messaging app notifications
+- `BIND_NOTIFICATION_LISTENER_SERVICE` - Intercept notifications from SMS apps for auto-reply
 
 ### Background Services
 - `FOREGROUND_SERVICE` - Run background listeners
@@ -124,21 +123,24 @@ Aigentik requires the following permissions for its features:
 ## Project Structure
 
 ```
-Aigentik/
-├── app/                          # Main application module
-│   └── src/main/java/com/aigentik/assistant/
-│       ├── data/                 # Room database, data models
-│       ├── llm/                  # LLM inference (SmolLM)
-│       ├── email/                # Email integration
-│       ├── calendar/             # Calendar integration
-│       ├── sms/                  # SMS/RCS integration
-│       ├── ui/                   # Jetpack Compose UI
-│       └── prism4j/              # Code syntax highlighting
-├── smollm/                       # JNI bindings for llama.cpp
-├── smolvectordb/                 # Vector database module
-├── hf-model-hub-api/             # Hugging Face API
-├── llama.cpp/                    # llama.cpp submodule
-└── .github/workflows/            # GitHub Actions CI/CD
+aigentik-app/
+├── app/src/main/java/com/aigentik/app/
+│   ├── ai/              # AgentLLMFacade (wraps SmolLM; on-demand load + idle unload)
+│   ├── agent/           # ActionSchema, ActionSchemaValidator, RiskScorer, ActionPolicyEngine
+│   ├── auth/            # AdminAuthManager (PBKDF2), GoogleAuthManager (OAuth2)
+│   ├── benchmark/       # BenchmarkRunner, CorpusBuilder, MetricsExporter, LatencyTracer
+│   ├── core/            # MessageEngine, ContactEngine, ChannelManager, AigentikService
+│   ├── data/            # AppDB (Room), Chat/Message/LLMModel/Folder/TaskMetric entities
+│   ├── email/           # GmailApiClient, GmailHistoryClient, EmailMonitor, EmailRouter
+│   ├── llm/             # SmolLM wrapper (SmolChat base)
+│   ├── sms/             # AigentikNotificationListener, NotificationReplyRouter
+│   ├── system/          # BootReceiver, ConnectionWatchdog
+│   └── ui/              # Jetpack Compose screens (chat, settings, model download)
+├── smollm/              # Android library: JNI bindings for llama.cpp
+├── smolvectordb/        # Android library: on-device vector search
+├── hf-model-hub-api/    # Kotlin library: Hugging Face Hub API client
+├── llama.cpp/           # Git submodule (llama.cpp inference engine)
+└── .github/workflows/   # CI/CD: build + sign APK on push to main
 ```
 
 ## Technologies
@@ -153,30 +155,37 @@ Aigentik/
 
 ### First Time Setup
 
-1. Launch Aigentik on your device
-2. Download a GGUF model from the built-in model browser or import one from Hugging Face
-3. Start chatting with your on-device AI assistant!
+1. Launch Aigentik — you will be directed to **download a GGUF model** if none is present
+2. After download, you are directed to **Agent Settings** to configure your name, phone number, and admin password
+3. Grant **Notification Access** (Settings → Notification Access → Aigentik) — required for SMS/RCS auto-reply
+4. Request **battery optimization exemption** when prompted — prevents Samsung from killing the background service
+5. Optionally **Sign In with Google** in Agent Settings to enable Gmail and Google Voice auto-reply
 
-### Email Setup
+### SMS/RCS Auto-Reply
 
-1. Go to Settings > Email Accounts
-2. Add your email account (Gmail, Outlook, or IMAP)
-3. Grant necessary permissions
-4. Start using AI to draft and send emails
+Works out of the box for Google Messages, Samsung Messages, Verizon Messages, AT&T Messages, and other major carrier SMS apps. Requires Notification Access permission.
 
-### Calendar Setup
+### Gmail Auto-Reply
 
-1. Go to Settings > Calendar
-2. Grant calendar permissions
-3. Enable the calendars you want to use
-4. Ask AI to schedule meetings or check your availability
+1. Open the ⋮ menu in the chat screen → **Aigentik Settings**
+2. Tap **Sign In with Google**
+3. Grant Gmail permissions when prompted
+4. Incoming emails now trigger AI replies via the Gmail History API
 
-### SMS Setup
+### Remote Admin via SMS
 
-1. Go to Settings > SMS/RCS
-2. Enable Notification Listener for Aigentik
-3. Grant SMS permissions
-4. Enable AI reply suggestions for incoming messages
+Send a multi-line SMS from your registered phone number:
+```
+Admin: YourName
+Password: yourpassword
+status
+```
+Commands: `status`, `channels`, `find [name]`, `check email`, `sync contacts`, `enable/disable sms/email/gvoice`
+
+Destructive commands (delete, wipe, clear, mass text) require a follow-up confirmation:
+```
+confirm: <original command>
+```
 
 ## Building APKs
 
