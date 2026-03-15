@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.aigentik.app.agent.ActionPolicyEngine
 import com.aigentik.app.ai.AgentLLMFacade
+import com.aigentik.app.routing.ModelRouter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -77,6 +78,15 @@ class BenchmarkRunner(
 
         tracer.mark(LatencyTracer.Stage.ROUTING_START)
 
+        // Adaptive model routing: pick tier based on task type + device state when enabled
+        val routingDecision = if (config.enableAdaptiveRouting) {
+            ModelRouter.route(context, task.input)
+        } else {
+            ModelRouter.route(context, task.input, forceTier = config.modelTier)
+        }
+        val effectiveTier = routingDecision.selectedTier
+        val profile = routingDecision.profile
+
         // Ensure model is loaded (on-demand via AgentLLMFacade v2.0)
         tracer.mark(LatencyTracer.Stage.LLM_LOAD_START)
         // AgentLLMFacade.ensureLoaded() is internal; generateXxx calls it implicitly
@@ -84,22 +94,29 @@ class BenchmarkRunner(
 
         tracer.mark(LatencyTracer.Stage.INFERENCE_START)
 
-        // Route to appropriate generation method based on task type
-        val output: String = when (task.taskType) {
-            ExperimentConfig.TYPE_REPLY, ExperimentConfig.TYPE_PARSE ->
-                AgentLLMFacade.generateSmsReply(
-                    senderName    = task.context.ifBlank { null },
-                    senderPhone   = "benchmark",
-                    message       = task.input,
-                    relationship  = null,
-                    instructions  = null,
-                )
-            ExperimentConfig.TYPE_SUMMARIZE, ExperimentConfig.TYPE_RETRIEVE,
-            ExperimentConfig.TYPE_CALENDAR ->
-                AgentLLMFacade.generateChatReply(
-                    message = "${task.context}\n${task.input}".trim(),
-                )
-            else -> AgentLLMFacade.generateChatReply(message = task.input)
+        // Route to appropriate generation method.
+        // When profile.useLlm=false (small tier), use fast regex path — no LLM inference.
+        val output: String = if (!profile.useLlm && task.taskType == ExperimentConfig.TYPE_PARSE) {
+            // Fast path: keyword command parser (sub-millisecond, no model needed)
+            val cmd = AgentLLMFacade.parseSimpleCommandPublic(task.input)
+            "${cmd.action}${cmd.target?.let { " $it" } ?: ""}${cmd.content?.let { ": $it" } ?: ""}"
+        } else {
+            when (task.taskType) {
+                ExperimentConfig.TYPE_REPLY, ExperimentConfig.TYPE_PARSE ->
+                    AgentLLMFacade.generateSmsReply(
+                        senderName    = task.context.ifBlank { null },
+                        senderPhone   = "benchmark",
+                        message       = task.input,
+                        relationship  = null,
+                        instructions  = null,
+                    )
+                ExperimentConfig.TYPE_SUMMARIZE, ExperimentConfig.TYPE_RETRIEVE,
+                ExperimentConfig.TYPE_CALENDAR ->
+                    AgentLLMFacade.generateChatReply(
+                        message = "${task.context}\n${task.input}".trim(),
+                    )
+                else -> AgentLLMFacade.generateChatReply(message = task.input)
+            }
         }
 
         tracer.mark(LatencyTracer.Stage.FIRST_TOKEN) // SmolLM is synchronous — mark after
@@ -126,7 +143,7 @@ class BenchmarkRunner(
             taskId               = task.taskId,
             experimentId         = config.experimentId,
             taskType             = task.taskType,
-            modelTier            = config.modelTier,
+            modelTier            = effectiveTier,  // actual tier used (may differ from config.modelTier)
             startTimestampMs     = tracer.startTimestampMs(),
             endTimestampMs       = tracer.endTimestampMs(),
             latencyMs            = tracer.totalLatencyMs().coerceAtLeast(0L),
@@ -143,7 +160,7 @@ class BenchmarkRunner(
             actionExecuted       = output.isNotBlank() && pd.allowed,
             outputQualityScore   = null,    // requires human eval or reference scoring
             oomKill              = false,
-            errorCode            = null,
+            errorCode            = if (task.adversarial) "adversarial" else null,
         )
     }
 
@@ -196,12 +213,19 @@ class BenchmarkRunner(
                 if (line.isBlank() || line.startsWith("//")) return@forEach
                 try {
                     val json = JSONObject(line)
+                    // Accept both "type" (short) and "task_type" (EVALUATION_PROTOCOL.md long form)
+                    val rawType = json.optString("type", "")
+                        .ifBlank { json.optString("task_type", ExperimentConfig.TYPE_REPLY) }
                     tasks.add(
                         CorpusTask(
-                            taskId   = json.optString("task_id", "task_$lineNum"),
-                            taskType = json.optString("type", ExperimentConfig.TYPE_REPLY),
-                            input    = json.optString("input", ""),
-                            context  = json.optString("context", ""),
+                            taskId          = json.optString("task_id", "task_$lineNum"),
+                            taskType        = mapTaskType(rawType),
+                            input           = json.optString("input", ""),
+                            context         = json.optString("context", "")
+                                .ifBlank { json.optString("contact_relation", "") },
+                            adversarial     = json.optBoolean("adversarial", false),
+                            expectedRisk    = json.optString("expected_risk_tier", ""),
+                            groundTruthSafe = json.optBoolean("ground_truth_safe", true),
                         )
                     )
                 } catch (e: Exception) {
@@ -212,10 +236,23 @@ class BenchmarkRunner(
         return tasks
     }
 
+    /** Map EVALUATION_PROTOCOL.md long task_type names to ExperimentConfig short names. */
+    private fun mapTaskType(raw: String): String = when (raw) {
+        "message_reply"      -> ExperimentConfig.TYPE_REPLY
+        "command_parse"      -> ExperimentConfig.TYPE_PARSE
+        "summarization"      -> ExperimentConfig.TYPE_SUMMARIZE
+        "retrieval"          -> ExperimentConfig.TYPE_RETRIEVE
+        "calendar_reasoning" -> ExperimentConfig.TYPE_CALENDAR
+        else                 -> raw // already short form or unknown
+    }
+
     data class CorpusTask(
         val taskId: String,
         val taskType: String,
         val input: String,
         val context: String,
+        val adversarial: Boolean = false,
+        val expectedRisk: String = "",
+        val groundTruthSafe: Boolean = true,
     )
 }

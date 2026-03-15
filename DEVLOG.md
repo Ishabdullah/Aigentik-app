@@ -716,3 +716,95 @@ Options (priority order per CLAUDE.md):
 4. **On-Device Memory** — MemoryStore, MemorySummarizer, MemoryRetriever, MemoryDecayEngine.
 
 ---
+
+## 2026-03-15 — Session 11: Adaptive Model Routing (R-1)
+
+### Implemented
+
+- `routing/TaskClassifier.kt` — keyword-based task type classifier (no LLM).
+  Classifies input → TYPE_REPLY | TYPE_PARSE | TYPE_SUMMARIZE | TYPE_RETRIEVE | TYPE_CALENDAR.
+  `complexityScore()` returns 0.0–1.0 based on word count — used by ModelRouter for tier upgrade.
+  Runs in microseconds; no allocation beyond String ops.
+
+- `routing/ModelProfile.kt` — data class describing a model tier's resource/perf envelope.
+  Three built-in profiles: SMALL (regex-only, useLlm=false), MEDIUM (2048 ctx), LARGE (4096 ctx).
+  `forTier(tier)` factory method. Latency defaults are conservative Qwen 0.5B Q4 estimates.
+
+- `routing/DeviceStateReader.kt` — reads battery %, isCharging, thermal status, available RAM
+  in one call. Wraps BatteryStatsCollector + ThermalStateCollector (benchmark package) and adds
+  ActivityManager.MemoryInfo. `isThermallyConstrained`, `isBatteryLow`, `isRamConstrained`
+  helpers computed as properties on DeviceState.
+
+- `routing/RoutingLogger.kt` — rolling in-memory log of routing decisions (last 500 entries).
+  Thread-safe CopyOnWriteArrayList. `toCsv()` exports all decisions with timestamp, task type,
+  complexity, selected tier, reason, battery, thermal, RAM. Cleared per-export if desired.
+
+- `routing/ModelRouter.kt` — combines task classification + device state → tier decision.
+  Decision matrix (priority order):
+  1. forceTier != null            → forced by experiment config
+  2. thermal >= SEVERE (3)        → "small"
+  3. battery < 15% + not charging → "small"
+  4. availableRam < 400MB         → "small"
+  5. parse task + complexity < 0.4 → "small" (fast command path)
+  6. summarize/calendar or complexity >= 0.8 → "large"
+  7. default                      → "medium"
+  Logs every decision via RoutingLogger. Returns RoutingDecision with profile + reason.
+
+- `benchmark/BenchmarkRunner.kt` — updated to use ModelRouter when `enableAdaptiveRouting=true`.
+  When adaptive: ModelRouter.route() selects tier. When not adaptive: route() called with
+  forceTier=config.modelTier (still logs decisions for comparison).
+  `effectiveTier` written to TaskMetric.modelTier — benchmark CSV shows actual tier used.
+  When profile.useLlm=false (small tier + parse task): uses AgentLLMFacade.parseSimpleCommandPublic()
+  fast path — no JNI inference call; ~0ms latency captured for "small" rows.
+
+- `benchmark/MetricsExporter.kt` — updated to export `routing_decisions.csv` alongside
+  metrics.csv/summary.json/thermal_trace.csv when RoutingLogger has entries.
+  Enables offline analysis of routing decisions vs task outcomes.
+
+### Architecture
+
+- `ModelProfile.useLlm=false` (SMALL tier) means the "model" for that task is pure regex —
+  no native model load required. Enables near-zero-latency baseline for simple commands.
+- ModelRouter and RoutingLogger are `object` singletons — consistent with other agent-layer engines.
+- `ExperimentConfig.enableAdaptiveRouting=true` now has a real effect: every task in a benchmark
+  run is independently routed. enableAdaptiveRouting=false forces config.modelTier for all tasks.
+
+### How adaptive routing affects a benchmark run
+
+```
+BenchmarkRunner.runTask(task)
+  → ModelRouter.route(context, task.input, forceTier if !adaptive)
+    → TaskClassifier.classify(task.input) → taskType
+    → TaskClassifier.complexityScore(task.input) → complexity
+    → DeviceStateReader.read(context) → DeviceState
+    → selectTier() → tier + reason
+    → RoutingLogger.log()
+    → RoutingDecision(tier, profile, taskType, complexity, reason)
+  → if !profile.useLlm && parse → parseSimpleCommandPublic() [~0ms]
+  → else → AgentLLMFacade.generate*() [~10–30s]
+  → TaskMetric(modelTier = effectiveTier, ...)  ← actual tier in CSV
+```
+
+### Known Gaps (Stage 9)
+
+- No live routing in MessageEngine yet (only benchmark). Stage 9 item.
+- "large" tier in practice uses the same model as "medium" — only context window differs.
+  Real multi-model routing requires multiple GGUF files on device (post-grant Phase II).
+- RoutingLogger entries survive only in-process — cleared on service restart. Persisting to
+  Room would require a new table; deferring unless grant review requires it.
+- Energy-Adaptive Scheduler (InferenceScheduler, ThermalPolicy, BatteryPolicy) not yet built.
+  ExperimentConfig.energyPolicyEnabled still has no effect.
+
+### Next Session: Start Here — Stage 9
+
+Options (priority order per CLAUDE.md):
+1. **Energy-Adaptive Scheduler** — `InferenceScheduler.kt`, `ThermalPolicy.kt`, `BatteryPolicy.kt`
+   in `app/.../scheduler/`. Makes ExperimentConfig.energyPolicyEnabled functional.
+   Defers non-urgent inference when battery < threshold or thermal >= SEVERE.
+2. **Live Routing in MessageEngine** — call ModelRouter.route() in MessageEngine.handlePublicMessage()
+   so live SMS traffic is also adaptively routed (not just benchmark tasks).
+3. **ApprovalWorkflow** — `ApprovalWorkflow.kt`, `ApprovalReceiver.kt`. Turns REQUIRE_APPROVAL
+   from a degraded BLOCK into a real human-in-the-loop system notification with Approve/Deny actions.
+4. **On-Device Memory** — MemoryStore, MemorySummarizer, MemoryRetriever, MemoryDecayEngine.
+
+---

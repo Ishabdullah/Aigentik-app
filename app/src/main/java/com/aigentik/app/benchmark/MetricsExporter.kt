@@ -3,6 +3,7 @@ package com.aigentik.app.benchmark
 import android.content.Context
 import android.util.Log
 import com.aigentik.app.benchmark.ThermalStateCollector.statusLabel
+import com.aigentik.app.routing.RoutingLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -53,6 +54,7 @@ object MetricsExporter {
             writeMetricsCsv(outDir, metrics)
             writeSummaryJson(outDir, config, metrics)
             writeThermalTraceCsv(outDir, metrics)
+            writeRoutingDecisionsCsv(outDir)
             Log.i(TAG, "Export complete: ${outDir.absolutePath}")
             outDir.absolutePath
         } catch (e: Exception) {
@@ -177,6 +179,12 @@ object MetricsExporter {
                           "${m.latencyMs},${m.thermalStatus},${statusLabel(m.thermalStatus)}")
         }
         File(dir, "thermal_trace.csv").writeText(sb.toString())
+    }
+
+    private fun writeRoutingDecisionsCsv(dir: File) {
+        val entries = RoutingLogger.getEntries()
+        if (entries.isEmpty()) return
+        File(dir, "routing_decisions.csv").writeText(RoutingLogger.toCsv())
     }
 
     private fun String.csvEscape(): String {
